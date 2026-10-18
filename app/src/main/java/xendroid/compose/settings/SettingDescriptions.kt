@@ -156,6 +156,7 @@ object SettingDescriptions {
         "validate_hir" to "Runs extra validation on the JIT's intermediate code during compilation; slow, for debugging",
         "value_convert_7e3_8888_reuse" to "Decode HDR EDRAM tiles reused as 8-bit color before blending, avoiding garbage-colored backgrounds",
         "video_standard" to "Video signal standard the console reports (NTSC, NTSC-J, or PAL); can affect region behavior",
+        "vulkan_debug_gpu_probe" to "Diagnostics that break the image on purpose, to measure what a part of the GPU work costs by skipping it. Bits: 1 skips the copies of small resolves (up to 128x128); 2 skips guest-memory stores of resolves into a texture; 4 skips all render target ownership transfers; 8 skips transfers between 4x MSAA and a 1x surface at the same EDRAM base; 16 skips averaging MSAA samples (reads only the first); 32 skips the stencil fetch of depth resolves. Add the bits you want together. Leave at 0 for normal play",
         "vulkan_allow_present_mode_fifo_relaxed" to "Allow relaxed vsync presentation, which may tear when frames miss the display refresh rate",
         "vulkan_allow_present_mode_immediate" to "Allow immediate presentation for lowest latency, at the cost of possible tearing",
         "vulkan_allow_present_mode_mailbox" to "Allow mailbox presentation, giving low latency without tearing when the driver supports it. Off by default: on HyperOS the image could freeze after minutes of play with it",

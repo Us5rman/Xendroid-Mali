@@ -37,7 +37,7 @@
         android:appCategory="game"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
-        android:label="@string/app_name"
+        android:label="Xendroid Mali"
         android:supportsRtl="true"
         android:theme="@style/Theme.xendroidCompose">
         <meta-data android:name="android.game_mode_config" android:resource="@xml/game_mode_config" />

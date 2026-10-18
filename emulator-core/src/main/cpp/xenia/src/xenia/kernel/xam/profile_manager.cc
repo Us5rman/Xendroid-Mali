@@ -21,6 +21,7 @@
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/crypto_utils.h"
+#include "xenia/kernel/xboxkrnl/xecrypt_sha.h"
 #include "xenia/vfs/devices/host_path_device.h"
 
 #if XE_PLATFORM_xendroid
@@ -50,7 +51,8 @@ bool ProfileManager::DecryptAccountFile(const uint8_t* data,
 
   // Generate RC4 key from data hash
   uint8_t rc4_key[0x14];
-  util::HmacSha(key, 0x10, data, 0x10, 0, 0, 0, 0, rc4_key, 0x14);
+  xboxkrnl::XeCryptHmacSha(key, 0x10, data, 0x10, nullptr, 0, nullptr, 0,
+                           rc4_key, 0x14);
 
   uint8_t dec_data[sizeof(X_XAMACCOUNTINFO) + 8];
 
@@ -60,8 +62,8 @@ bool ProfileManager::DecryptAccountFile(const uint8_t* data,
 
   // Verify decrypted data against hash
   uint8_t data_hash[0x14];
-  util::HmacSha(key, 0x10, dec_data, sizeof(dec_data), 0, 0, 0, 0, data_hash,
-                0x14);
+  xboxkrnl::XeCryptHmacSha(key, 0x10, dec_data, sizeof(dec_data), nullptr, 0,
+                           nullptr, 0, data_hash, 0x14);
 
   if (std::memcmp(data, data_hash, 0x10) == 0) {
     // Copy account data to output
@@ -91,14 +93,15 @@ void ProfileManager::EncryptAccountFile(const X_XAMACCOUNTINFO* input,
 
   // Set data hash
   uint8_t data_hash[0x14];
-  util::HmacSha(key, 0x10, output + 0x10, enc_data_size, 0, 0, 0, 0, data_hash,
-                0x14);
+  xboxkrnl::XeCryptHmacSha(key, 0x10, output + 0x10, enc_data_size, nullptr, 0,
+                           nullptr, 0, data_hash, 0x14);
 
   std::memcpy(output, data_hash, 0x10);
 
   // Generate RC4 key from data hash
   uint8_t rc4_key[0x14];
-  util::HmacSha(key, 0x10, data_hash, 0x10, 0, 0, 0, 0, rc4_key, 0x14);
+  xboxkrnl::XeCryptHmacSha(key, 0x10, data_hash, 0x10, nullptr, 0, nullptr, 0,
+                           rc4_key, 0x14);
 
   // Encrypt data
   util::RC4(rc4_key, 0x10, output + 0x10, enc_data_size, output + 0x10,
@@ -573,7 +576,7 @@ bool ProfileManager::CreateAccount(const uint64_t xuid,
   const std::u16string gamertag_u16 = xe::to_utf16(gamertag);
 
   string_util::copy_and_swap_truncating(account.gamertag, gamertag_u16,
-                                        sizeof(account.gamertag));
+                                        xe::countof(account.gamertag));
 
   const bool result = UpdateAccount(xuid, &account);
   DismountProfile(xuid);

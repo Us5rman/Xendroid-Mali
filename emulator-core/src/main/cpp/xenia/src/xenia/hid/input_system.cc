@@ -9,6 +9,7 @@
 
 #include "xenia/base/logging.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -143,21 +144,29 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
 }
 
 X_RESULT InputSystem::GetState(uint32_t user_index, uint32_t flags,
-                               X_INPUT_STATE* out_state) {
+                               X_INPUT_STATE* out_state, bool ui_active) {
   SCOPE_profile_cpu_f("hid");
 
-  // If UI is blocking input, return zeroed state to the game
-  if (ui_input_blockers_.load() > 0) {
+  X_RESULT result = GetStateForUI(user_index, flags, out_state);
+  if (result != X_ERROR_SUCCESS) {
+    return result;
+  }
+  out_state->packet_number =
+      out_state->packet_number + ui_input_blocking_edges_.load();
+
+  // While UI holds the input, connected controllers read as at rest and empty
+  // slots stay empty, as xam reports them. The packet number stays live here
+  // since xam freezes it only for its own UI.
+  if (ui_active || IsUIInputBlocked()) {
+    uint32_t packet_number = out_state->packet_number;
     std::memset(out_state, 0, sizeof(X_INPUT_STATE));
+    out_state->packet_number = packet_number;
     return X_ERROR_SUCCESS;
   }
 
-  X_RESULT result = GetStateForUI(user_index, flags, out_state);
-
   // Mask buttons that were held when a UI dialog closed until they're
   // released, so the close-press doesn't carry through into the game.
-  if (result == X_ERROR_SUCCESS && user_index < XUserMaxUserCount &&
-      consumed_buttons_[user_index] != 0) {
+  if (consumed_buttons_[user_index] != 0) {
     uint16_t buttons = out_state->gamepad.buttons;
     consumed_buttons_[user_index] &= buttons;
     out_state->gamepad.buttons = buttons & ~consumed_buttons_[user_index];
@@ -174,7 +183,11 @@ X_RESULT InputSystem::GetStateForUI(uint32_t user_index, uint32_t flags,
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
   auto& binding = slot_bindings_[user_index];
-  if (binding.driver && (flags & binding.driver->GetInputType()) != 0) {
+  if (binding.driver) {
+    // Wrong device type for this slot is not a disconnect.
+    if ((flags & binding.driver->GetInputType()) == 0) {
+      return X_ERROR_DEVICE_NOT_CONNECTED;
+    }
     X_RESULT r = binding.driver->GetState(binding.driver_slot, out_state);
     if (r == X_ERROR_SUCCESS) {
       UpdateUsedSlot(binding.driver, user_index, true);
@@ -189,7 +202,11 @@ X_RESULT InputSystem::GetStateForUI(uint32_t user_index, uint32_t flags,
   return X_ERROR_DEVICE_NOT_CONNECTED;
 }
 
-void InputSystem::AddUIInputBlocker() { ui_input_blockers_.fetch_add(1); }
+void InputSystem::AddUIInputBlocker() {
+  if (ui_input_blockers_.fetch_add(1) == 0) {
+    ui_input_blocking_edges_.fetch_add(1);
+  }
+}
 
 void InputSystem::RemoveUIInputBlocker() {
   // Before removing the blocker, capture any currently pressed buttons.
@@ -202,7 +219,9 @@ void InputSystem::RemoveUIInputBlocker() {
     }
   }
 
-  ui_input_blockers_.fetch_sub(1);
+  if (ui_input_blockers_.fetch_sub(1) == 1) {
+    ui_input_blocking_edges_.fetch_add(1);
+  }
 }
 
 X_RESULT InputSystem::SetState(uint32_t user_index,
@@ -220,13 +239,24 @@ X_RESULT InputSystem::SetState(uint32_t user_index,
 }
 
 X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
-                                   X_INPUT_KEYSTROKE* out_keystroke) {
+                                   X_INPUT_KEYSTROKE* out_keystroke,
+                                   bool ui_active) {
   SCOPE_profile_cpu_f("hid");
 
-  // If UI is blocking input, return empty keystroke to the game.
-  if (ui_input_blockers_.load() > 0) {
+  // While UI holds the input, connected slots have no keystrokes and empty ones
+  // stay empty, as xam reports them. Never success, since a title draining
+  // keystrokes until EMPTY would spin forever.
+  if (ui_active || IsUIInputBlocked()) {
     std::memset(out_keystroke, 0, sizeof(X_INPUT_KEYSTROKE));
-    return X_ERROR_EMPTY;
+    X_INPUT_STATE state;
+    // Keyboard drivers feed every slot, like below.
+    bool connected =
+        GetStateForUI(user_index, flags, &state) == X_ERROR_SUCCESS ||
+        ((flags & InputType::Keyboard) &&
+         std::any_of(drivers_.begin(), drivers_.end(), [](const auto& driver) {
+           return driver->GetInputType() == InputType::Keyboard;
+         }));
+    return connected ? X_ERROR_EMPTY : X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   bool any_connected = false;
@@ -239,6 +269,8 @@ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
     any_connected = true;
     if (r == X_ERROR_SUCCESS) {
       last_used_slot = user_index;
+      // Drivers stamp their own slot. The title expects the user it asked for.
+      out_keystroke->user_index = static_cast<uint8_t>(user_index);
     }
     return r;
   };

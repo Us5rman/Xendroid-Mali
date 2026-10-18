@@ -1429,8 +1429,8 @@ void CommandProcessor::WorkerThreadMain() {
       frame_time_stats_.exec_ns += FrameStatsNow() - fs_exec_begin;
     }
 
-    // TODO(benvanik): use reader->Read_update_freq_ and only issue after moving
-    //     that many indices.
+    // ExecutePrimaryBuffer republishes this every read_ptr_update_freq_ dwords
+    // as it drains, this is the final position for the burst.
     // Keep in mind that the gpu also updates the cpu-side copy if the write
     // pointer and read pointer would be equal
     if (read_ptr_writeback_ptr_) {
@@ -1525,9 +1525,10 @@ void CommandProcessor::EnableReadPointerWriteBack(uint32_t ptr,
   // ptr = RB_RPTR_ADDR, pointer to write back the address to.
   read_ptr_writeback_ptr_ = ptr;
   // CP_RB_CNTL Ring Buffer Control 0x704
-  // block_size = RB_BLKSZ, log2 of number of quadwords read between updates of
-  //              the read pointer.
-  read_ptr_update_freq_ = uint32_t(1) << block_size_log2 >> 2;
+  // block_size = RB_BLKSZ, log2 of the number of quadwords read between
+  // updates of the read pointer. Kept in dwords, the unit read_ptr_index_ and
+  // the write-back use. Usually 6, so 128 dwords.
+  read_ptr_update_freq_ = (uint32_t(1) << std::min(block_size_log2, 19u)) * 2;
 }
 
 XE_NOINLINE XE_COLD void CommandProcessor::LogKickoffInitator(uint32_t value) {

@@ -10,6 +10,7 @@
 #ifndef XENIA_KERNEL_XAM_XAM_STATE_H_
 #define XENIA_KERNEL_XAM_XAM_STATE_H_
 
+#include <array>
 #include <memory>
 
 #include "xenia/kernel/xam/achievement_manager.h"
@@ -74,6 +75,10 @@ class XamState {
   uint32_t content_register_callback = 0;
 
   std::atomic<bool> is_xam_dialog_present_ = false;
+
+  // Packet number of the last controller state the title read, per user,
+  // which it keeps reading while xam's UI holds the input.
+  std::array<uint32_t, XUserMaxUserCount> title_input_packet_numbers_ = {};
 
  private:
   void LoadLanguageLocaleFallback();

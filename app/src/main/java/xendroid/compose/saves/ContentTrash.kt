@@ -43,7 +43,8 @@ class RestoreRefusedException(val why: Why, val name: String = "") : IllegalStat
  * game or other content job running).
  *
  * A package is two things the core keeps apart: its data folder
- * (<root>/0000000000000000/<TID>/<TYPE>/<pkg>) and its header
+ * (<root>/0000000000000000/<TID>/<TYPE>/<pkg>; a package a title copied as one file is that
+ * file, which the core mounts as it is) and its header
  * (<root>/0000000000000000/<TID>/Headers/<TYPE>/<pkg>.header). Moving both is journaled by
  * the entry's own folder name: "<id>.partial" while trashing (rolled back by [recover]),
  * "<id>" once trashed, "<id>.restoring" while restoring (finished by [recover]). Each step
@@ -81,7 +82,8 @@ class ContentTrash(
     fun moveToTrash(@Suppress("UNUSED_PARAMETER") lease: ContentLease, titleId: String, contentType: Int,
                     pkgDir: String, displayName: String): TrashedContent {
         val (data, header) = locate(titleId, contentType, pkgDir)
-        require(Files.isDirectory(data.toPath(), LinkOption.NOFOLLOW_LINKS)) { "Package not found" }
+        require(Files.isDirectory(data.toPath(), LinkOption.NOFOLLOW_LINKS) ||
+            Files.isRegularFile(data.toPath(), LinkOption.NOFOLLOW_LINKS)) { "Package not found" }
         val bytes = sizeOf(data) + (if (header.isFile) header.length() else 0L)
         val used = usedBytes()
         if (used + bytes > quotaBytes) throw TrashFullException(used, quotaBytes, bytes)

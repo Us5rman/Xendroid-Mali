@@ -18,6 +18,7 @@
 #include "xenia/cpu/compiler/passes/control_flow_simplification_pass.h"
 #include "xenia/cpu/compiler/passes/data_flow_analysis_pass.h"
 #include "xenia/cpu/compiler/passes/dead_code_elimination_pass.h"
+#include "xenia/cpu/compiler/passes/dead_cr_store_elimination_pass.h"
 #include "xenia/cpu/compiler/passes/delay_countdown_collapse_pass.h"
 #include "xenia/cpu/compiler/passes/memory_poll_park_pass.h"
 #include "xenia/cpu/compiler/passes/finalization_pass.h"

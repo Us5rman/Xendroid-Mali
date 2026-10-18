@@ -539,8 +539,9 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
       uint32_t index_size_log2 =
           guest_index_format == xenos::IndexFormat::kInt16 ? 1 : 2;
       // The base should already be aligned, but aligning here too for safety.
-      guest_index_base =
-          regs[XE_GPU_REG_VGT_DMA_BASE] & ~uint32_t((1 << index_size_log2) - 1);
+      // Mask to physical - the guest may use a mirror window.
+      guest_index_base = xenos::CpuToGpu(regs[XE_GPU_REG_VGT_DMA_BASE]) &
+                         ~uint32_t((1 << index_size_log2) - 1);
       guest_index_buffer_needed_bytes = guest_draw_vertex_count
                                         << index_size_log2;
       if (guest_index_base > SharedMemory::kBufferSize ||
@@ -753,8 +754,9 @@ bool PrimitiveProcessor::Process(ProcessingResult& result_out) {
     uint32_t index_size_log2 =
         guest_index_format == xenos::IndexFormat::kInt16 ? 1 : 2;
     // The base should already be aligned, but aligning here too for safety.
-    guest_index_base =
-        regs[XE_GPU_REG_VGT_DMA_BASE] & ~uint32_t((1 << index_size_log2) - 1);
+    // Mask to physical - the guest may use a mirror window.
+    guest_index_base = xenos::CpuToGpu(regs[XE_GPU_REG_VGT_DMA_BASE]) &
+                       ~uint32_t((1 << index_size_log2) - 1);
     guest_index_buffer_needed_bytes = guest_draw_vertex_count
                                       << index_size_log2;
     if (guest_index_base > SharedMemory::kBufferSize ||
@@ -1567,10 +1569,13 @@ PrimitiveProcessor::CacheTransaction::~CacheTransaction() {
 
   auto global_lock = processor_.global_critical_region_.Acquire();
 
+  // The invalidation callback zeroes the size if the range was written during
+  // processing, which may have read the old indices.
+  const bool written = !processor_.cache_currently_processing_size_bytes_;
   processor_.cache_currently_processing_base_ = 0;
   processor_.cache_currently_processing_size_bytes_ = 0;
 
-  if (result_type_ == ResultType::kNewSet) {
+  if (result_type_ == ResultType::kNewSet && !written) {
     size_t new_entry_index;
     if (processor_.cache_bucket_free_first_entry_ != SIZE_MAX) {
       new_entry_index = processor_.cache_bucket_free_first_entry_;
@@ -1646,6 +1651,13 @@ std::pair<uint32_t, uint32_t> PrimitiveProcessor::MemoryInvalidationCallback(
   uint32_t bucket_l2_bits_index_first = bucket_index_first >> 12;
   uint32_t bucket_l2_bits_index_last = bucket_index_last >> 12;
   auto global_lock = global_critical_region_.Acquire();
+  if (cache_currently_processing_size_bytes_ &&
+      cache_currently_processing_base_ < physical_address_end &&
+      cache_currently_processing_base_ +
+              cache_currently_processing_size_bytes_ >
+          physical_address_start) {
+    cache_currently_processing_size_bytes_ = 0;
+  }
   for (uint32_t bucket_l2_bits_index = bucket_l2_bits_index_first;
        bucket_l2_bits_index <= bucket_l2_bits_index_last;
        ++bucket_l2_bits_index) {
@@ -1715,7 +1727,7 @@ std::pair<uint32_t, uint32_t> PrimitiveProcessor::MemoryInvalidationCallback(
           // the specified range.
           if (entry_key.base < physical_address_end) {
             uint32_t entry_end = entry_key.base + entry_key.GetSizeBytes();
-            if (entry_end > physical_address_end) {
+            if (entry_end > physical_address_start) {
               // Invalidate the entry.
               any_invalidated = true;
               // Remove the entry from the cache map.

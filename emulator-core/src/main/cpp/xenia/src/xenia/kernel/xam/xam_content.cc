@@ -125,21 +125,26 @@ dword_result_t xeXamContentResolve(
         root_device_path = "\\Device\\Harddisk0\\Partition1\\Content\\";
       } else if (content_data.device_id ==
                  static_cast<uint32_t>(DummyDeviceId::ODD)) {
-        // Or GAME, but D: usually means DVD drive meanwhile GAME always
-        // pinpoints to game, even if it is running from HDD
-        root_device_path = "D:\\content\\";
+        root_device_path = kernel_state()->title_mount_path_ + "\\content\\";
       } else {
         return X_ERROR_INVALID_PARAMETER;
       }
     }
 
-    const std::string relative_path = fmt::format(
-        "{:016X}\\{:08X}\\{:08X}\\{}", xuid, kernel_state()->title_id(),
-        static_cast<uint32_t>(content_data.content_type.get()),
-        content_data.file_name());
+    const std::string relative_dir =
+        fmt::format("{:016X}\\{:08X}\\{:08X}", xuid, kernel_state()->title_id(),
+                    static_cast<uint32_t>(content_data.content_type.get()));
+    const std::string content_dir = root_device_path + relative_dir;
 
-    string_util::copy_truncating(path_ptr, root_device_path + relative_path,
-                                 path_size);
+    // The caller creates the package file itself, so the directory must exist.
+    if (create_directory && !kernel_state()->file_system()->CreatePath(
+                                content_dir, vfs::kFileAttributeDirectory)) {
+      XELOGW("XamContentResolve: Cannot create content directory {}",
+             content_dir);
+    }
+
+    string_util::copy_truncating(
+        path_ptr, content_dir + "\\" + content_data.file_name(), path_size);
 
     // Check if it exists and try to mount that package
     // Result of buffer_ptr is sent to RtlInitAnsiString.
@@ -1018,7 +1023,8 @@ dword_result_t XamContentLaunchImageInternal_entry(lpvoid_t content_data_ptr,
   // This should be done via content_manager, however as it isn't capable of
   // such action we need to improvise.
   const std::string package_path =
-      fmt::format("GAME:/Content/0000000000000000/{:08X}/{:08X}/{}", title_id,
+      fmt::format("{}/Content/0000000000000000/{:08X}/{:08X}/{}",
+                  kernel_state()->title_mount_path_, title_id,
                   static_cast<uint32_t>(content_data.content_type.get()),
                   content_data.file_name());
 

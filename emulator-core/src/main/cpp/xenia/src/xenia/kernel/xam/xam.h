@@ -91,7 +91,7 @@ struct X_XAMACCOUNTINFO {
   }
 
   bool IsParentalControlled() const {
-    return static_cast<bool>((cached_user_flags & kLanguageMask) >> 24);
+    return static_cast<bool>(cached_user_flags & kParentalControlEnabled);
   }
 
   XLanguage GetLanguage() const {

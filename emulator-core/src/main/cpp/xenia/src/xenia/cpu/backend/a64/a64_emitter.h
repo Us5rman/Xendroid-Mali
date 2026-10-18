@@ -15,6 +15,8 @@
 #include <vector>
 
 #include "xenia/base/arena.h"
+#include "xenia/base/vec128.h"
+#include "xenia/cpu/backend/backend.h"
 #include "xenia/cpu/backend/code_cache_base.h"
 #include "xenia/cpu/function.h"
 #include "xenia/cpu/function_trace_data.h"
@@ -194,8 +196,70 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
 
   bool near_branches() const { return near_branches_; }
 
+  // Single-instruction conditional branches for forward targets that are
+  // PROVABLY within range because the label is bound a bounded number of
+  // instructions later within the same sequence/helper emission (e.g.
+  // intra-sequence fast-path skips). Callers must guarantee the bound:
+  // ±1 MiB for b_near/cbz_near/cbnz_near. (In near_branches() mode the
+  // shadows above are direct already.)
+  void b_near(const Xbyak_aarch64::Cond cond,
+              const Xbyak_aarch64::Label& label) {
+    CodeGenerator::b(cond, label);
+  }
+  void cbz_near(const Xbyak_aarch64::WReg& rt,
+                const Xbyak_aarch64::Label& label) {
+    CodeGenerator::cbz(rt, label);
+  }
+  void cbz_near(const Xbyak_aarch64::XReg& rt,
+                const Xbyak_aarch64::Label& label) {
+    CodeGenerator::cbz(rt, label);
+  }
+  void cbnz_near(const Xbyak_aarch64::WReg& rt,
+                 const Xbyak_aarch64::Label& label) {
+    CodeGenerator::cbnz(rt, label);
+  }
+  void cbnz_near(const Xbyak_aarch64::XReg& rt,
+                 const Xbyak_aarch64::Label& label) {
+    CodeGenerator::cbnz(rt, label);
+  }
+
+  // A compare whose only reader is the branch right after it makes no
+  // boolean: the branch reads the flags the compare set. Keyed on the
+  // register the cset would have written; cleared on read. Only instructions
+  // that PassesHandoffs may sit between the two, and the branch must take it,
+  // or Emit fails the function.
+  void MarkFusedCompareBranch(int dest_reg, Xbyak_aarch64::Cond cond) {
+    fused_cmp_branch_reg_ = dest_reg;
+    fused_cmp_branch_cond_ = cond;
+  }
+  bool ConsumeFusedCompareBranch(int dest_reg, Xbyak_aarch64::Cond* out_cond) {
+    if (dest_reg < 0 || fused_cmp_branch_reg_ != dest_reg) {
+      return false;
+    }
+    *out_cond = fused_cmp_branch_cond_;
+    fused_cmp_branch_reg_ = -1;
+    return true;
+  }
+
+  // SOURCE_OFFSET, CONTEXT_BARRIER and NOP emit no code that touches NZCV
+  // (here SOURCE_OFFSET only records a source map entry). COMMENT does not
+  // pass: it calls TraceString when instruction tracing is on.
+  static bool PassesHandoffs(const hir::Instr* instr) {
+    switch (instr->GetOpcodeNum()) {
+      case hir::OPCODE_SOURCE_OFFSET:
+      case hir::OPCODE_CONTEXT_BARRIER:
+      case hir::OPCODE_NOP:
+        return true;
+      default:
+        return false;
+    }
+  }
+
   // Get or create a xbyak_aarch64 label for a HIR label ID.
   Xbyak_aarch64::Label& GetLabel(uint32_t label_id);
+
+  // Get or create a pool slot for a v128 constant with no immediate form.
+  Xbyak_aarch64::Label& GetV128ConstLabel(const vec128_t& value);
 
   XexModule* GuestModule() { return guest_module_; }
 
@@ -212,6 +276,11 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
             EmitFunctionInfo& func_info);
   // Whether a guest function has to be emitted again with long-range branches.
   bool IsNearBranchOutOfRange(const Xbyak_aarch64::Error& e) const;
+
+  // Emit the pending v128 literals, branching over them when code follows.
+  bool FlushV128ConstPool(bool branch_over);
+  // Plant an island, only safe where a branch and data cannot split a sequence.
+  bool MaybeFlushV128ConstPool();
 
  protected:
   Processor* processor_ = nullptr;
@@ -240,8 +309,20 @@ class A64Emitter : public Xbyak_aarch64::CodeGenerator {
   std::vector<TailEmitter> tail_code_;
   std::vector<Xbyak_aarch64::Label*> label_cache_;
 
+  // v128 constants needing a literal, with labels owned by label_cache_.
+  std::vector<std::pair<vec128_t, Xbyak_aarch64::Label*>> v128_consts_;
+  // Code offset of the ldr that opened the pending pool.
+  size_t v128_consts_first_use_ = 0;
+
   // Map from HIR label IDs to xbyak_aarch64 Labels.
   std::unordered_map<uint32_t, Xbyak_aarch64::Label*> label_map_;
+
+  // The compare-branch handoff between adjacent sequences; see
+  // MarkFusedCompareBranch.
+  void ResetSequenceHandoffs() { fused_cmp_branch_reg_ = -1; }
+  bool sequence_handoff_pending() const { return fused_cmp_branch_reg_ >= 0; }
+  int fused_cmp_branch_reg_ = -1;
+  Xbyak_aarch64::Cond fused_cmp_branch_cond_ = Xbyak_aarch64::EQ;
 
   FPCRMode fpcr_mode_ = FPCRMode::Unknown;
   bool synchronize_stack_on_next_instruction_ = false;

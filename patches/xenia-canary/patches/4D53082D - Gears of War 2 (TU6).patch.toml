@@ -1,7 +1,7 @@
 title_name = "Gears of War 2" # TU6
 title_id = "4D53082D" # MS-2093
 hash = "62547A005C0420D2" # default.xex
-#media_id = "33FCE762" # Disc (Europe): http://redump.org/disc/19951
+#media_id = "33FCE762" # Disc (Europe): https://redump.info/disc/19951
 
 [[patch]]
     name = "Unlock FPS"
@@ -138,7 +138,6 @@ hash = "62547A005C0420D2" # default.xex
 
 [[patch]]
     name = "Disable Lens Flares"
-    desc = "Fixes unoccluded bright lights on-screen."
     author = "boma"
     is_enabled = false
 
@@ -237,6 +236,49 @@ hash = "62547A005C0420D2" # default.xex
         address = 0x821d55a0
         value = 2.32723
     [[patch.be32]]
+        address = 0x826e9bf0
+        value = 0x38600234
+    [[patch.be32]]
+        address = 0x826e9bf4
+        value = 0x48000008
+    [[patch.be32]]
+        address = 0x825324b4
+        value = 0x48387268
+    [[patch.be32]]
+        address = 0x828b971c
+        value = 0x3d60828b
+    [[patch.be32]]
+        address = 0x828b9720
+        value = 0x616b972c
+    [[patch.be32]]
+        address = 0x828b9724
+        value = 0xc00b0000
+    [[patch.be32]]
+        address = 0x828b9728
+        value = 0x4bc78d90
+
+[[patch]]
+    name = "Experimental 32:9 Super Ultrawide Aspect Ratio Support"
+    desc = "Must set present_letterbox = FALSE in the xenia canary config. Expands gameplay and cutscene rendering to true 32:9 ultrawide, updates the FOV axis constraint for proper framing, and adds pillarboxing for pre-rendered videos. Because the game now renders at 1280x360, certain elements will appear more aliased."
+    author = "boma, TudorHorse, killswitch"
+    is_enabled = false
+
+    [[patch.f32]] # GAMEPLAY & CUTSCENE FOV. If too wide/narrow, adjust in increments of 0.0005.
+        address = 0x828b972c
+        value = 0.013325
+    [[patch.be16]]
+        address = 0x828166ca
+        value = 0x0168
+    [[patch.be32]]
+        address = 0x82738550
+        value = 0x394002d0
+    [[patch.be16]]
+        address = 0x8253239c
+        value = 0x4800
+    [[patch.f32]] # 32:9 aspect ratio = 3.55556
+        address = 0x821d55a0
+        value = 3.55556
+    [[patch.be32]] # Keep this known-working 21:9 video/cutscene hook value
         address = 0x826e9bf0
         value = 0x38600234
     [[patch.be32]]

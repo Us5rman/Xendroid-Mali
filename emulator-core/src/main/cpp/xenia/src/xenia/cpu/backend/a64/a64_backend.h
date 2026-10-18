@@ -134,6 +134,9 @@ class A64Backend : public Backend {
   void* synchronize_guest_and_host_stack_helper() const {
     return synchronize_guest_and_host_stack_helper_;
   }
+  void* vrsqrtefp_scalar_helper() const { return vrsqrtefp_scalar_helper_; }
+  void* vrsqrtefp_vector_helper() const { return vrsqrtefp_vector_helper_; }
+  void* frsqrte_helper() const { return frsqrte_helper_; }
 
   bool Initialize(Processor* processor) override;
 
@@ -197,6 +200,9 @@ class A64Backend : public Backend {
   GuestToHostThunk guest_to_host_thunk_ = nullptr;
   ResolveFunctionThunk resolve_function_thunk_ = nullptr;
   void* synchronize_guest_and_host_stack_helper_ = nullptr;
+  void* vrsqrtefp_scalar_helper_ = nullptr;
+  void* vrsqrtefp_vector_helper_ = nullptr;
+  void* frsqrte_helper_ = nullptr;
 
  public:
   void* try_acquire_reservation_helper_ = nullptr;

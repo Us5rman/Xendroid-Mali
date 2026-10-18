@@ -117,6 +117,16 @@ DEFINE_CVar(launch_data, "",
 DEFINE_bool(dump_xex, false, "Dump the main XEX to current directory on launch",
             "General");
 
+DEFINE_string(media_type, "auto",
+              "Media the title is told it runs from. Use: [auto, hdd, odd]. "
+              "auto matches the launched image - ODD for iso/zar, HDD for a "
+              "directly launched default.xex, and STFS containers report "
+              "their type based on whether they are disc or digital dumps. "
+              "This should mostly be fine, but some disc dumps want to run "
+              "as HDD to avoid unnecessary file installs, while others may "
+              "need to run as ODD to force those installs.",
+              "Content");
+
 DEFINE_bool(allow_game_relative_writes, false,
             "Not useful to non-developers. Allows code to write to paths "
             "relative to game://. Used for "
@@ -306,38 +316,13 @@ X_STATUS Emulator::Setup(
   // 360 uses a 50MHz clock.
   Clock::set_guest_tick_frequency(50000000);
   // We could reset this with save state data/constant value to help replays.
-  Clock::set_guest_system_time_base(Clock::QueryHostSystemTime());
+  Clock::SetGuestSystemTime(Clock::QueryHostSystemTime());
   // This can be adjusted dynamically, as well.
   Clock::set_guest_time_scalar(cvars::time_scalar);
 
   // Before we can set thread affinity we must enable the process to use all
   // logical processors.
   xe::threading::EnableAffinityConfiguration();
-
-#if XE_PLATFORM_LINUX
-  // Check if /dev/shm is mounted with noexec. The code cache uses shm_open
-  // with PROT_EXEC, which will fail with EPERM on noexec tmpfs mounts.
-  {
-    std::ifstream mounts("/proc/mounts");
-    std::string line;
-    while (std::getline(mounts, line)) {
-      if (line.find("/dev/shm") != std::string::npos &&
-          line.find("noexec") != std::string::npos) {
-        XELOGE(
-            "/dev/shm is mounted with noexec, which prevents the code cache "
-            "from allocating executable memory. Please remount it with: "
-            "sudo mount -o remount,exec /dev/shm");
-        xe::ShowSimpleMessageBox(
-            xe::SimpleMessageBoxType::Error,
-            "/dev/shm is mounted with noexec, which prevents Xenia from "
-            "allocating executable memory for the code cache.\n\n"
-            "Please remount it with:\n"
-            "  sudo mount -o remount,exec /dev/shm");
-        return X_STATUS_UNSUCCESSFUL;
-      }
-    }
-  }
-#endif
 
   XELOGI("{}: Initializing Memory...", __func__);
   // Create memory system first, as it is required for other systems.
@@ -619,6 +604,7 @@ X_STATUS Emulator::MountPath(const std::filesystem::path& path,
   // Create symlinks to the device.
   file_system_->RegisterSymbolicLink(kDefaultGameSymbolicLink, mount_path);
   file_system_->RegisterSymbolicLink(kDefaultPartitionSymbolicLink, mount_path);
+  kernel_state_->title_mount_path_ = mount_path;
 
   return X_STATUS_SUCCESS;
 }
@@ -734,6 +720,25 @@ X_STATUS Emulator::LaunchPath(const std::filesystem::path& path) {
   }
 }
 
+void Emulator::SetDeploymentType(XDeploymentType detected_type) {
+  XDeploymentType type = detected_type;
+  if (cvars::media_type == "hdd") {
+    // kDownload is already an HDD device, and says more about the title.
+    if (detected_type != XDeploymentType::kDownload) {
+      type = XDeploymentType::kInstalledToHDD;
+    }
+  } else if (cvars::media_type == "odd") {
+    type = XDeploymentType::kOpticalDisc;
+  } else if (cvars::media_type != "auto") {
+    XELOGW("Unknown media_type '{}', using auto", cvars::media_type);
+  }
+
+  if (type != detected_type) {
+    XELOGI("Deployment type overridden to {}", cvars::media_type);
+  }
+  kernel_state_->deployment_type_ = type;
+}
+
 X_STATUS Emulator::LaunchXexFile(const std::filesystem::path& path) {
   // We create a virtual filesystem pointing to its directory and symlink
   // that to the game filesystem.
@@ -753,7 +758,7 @@ X_STATUS Emulator::LaunchXexFile(const std::filesystem::path& path) {
     return result;
   }
 
-  kernel_state_->deployment_type_ = XDeploymentType::kInstalledToHDD;
+  SetDeploymentType(XDeploymentType::kInstalledToHDD);
 
   if (!kernel::IsSystemTitle(kernel_state_->title_id())) {
     return result;
@@ -786,7 +791,7 @@ X_STATUS Emulator::LaunchDiscImage(const std::filesystem::path& path) {
   if (result == X_STATUS_NOT_FOUND && !cvars::launch_module.empty()) {
     return LaunchDefaultModule(path);
   }
-  kernel_state_->deployment_type_ = XDeploymentType::kOpticalDisc;
+  SetDeploymentType(XDeploymentType::kOpticalDisc);
   return result;
 }
 
@@ -799,7 +804,7 @@ X_STATUS Emulator::LaunchDiscArchive(const std::filesystem::path& path) {
   if (result == X_STATUS_NOT_FOUND && !cvars::launch_module.empty()) {
     return LaunchDefaultModule(path);
   }
-  kernel_state_->deployment_type_ = XDeploymentType::kOpticalDisc;
+  SetDeploymentType(XDeploymentType::kOpticalDisc);
   return result;
 }
 
@@ -810,7 +815,17 @@ X_STATUS Emulator::LaunchStfsContainer(const std::filesystem::path& path) {
   if (result == X_STATUS_NOT_FOUND && !cvars::launch_module.empty()) {
     return LaunchDefaultModule(path);
   }
-  kernel_state_->deployment_type_ = XDeploymentType::kDownload;
+
+  auto* container = dynamic_cast<vfs::XContentContainerDevice*>(
+      file_system_->GetDevice("\\Device\\Package_0"));
+  const uint32_t content_type = container ? container->content_type() : 0;
+  // A disc rip installed to the HDD still runs as a disc title.
+  const bool is_disc_content =
+      content_type == static_cast<uint32_t>(XContentType::kInstalledGame);
+  SetDeploymentType(is_disc_content ? XDeploymentType::kOpticalDisc
+                                    : XDeploymentType::kDownload);
+  XELOGI("LaunchStfsContainer: content type {:08X}, running as {}",
+         content_type, is_disc_content ? "optical disc" : "download");
   return result;
 }
 
@@ -820,12 +835,10 @@ X_STATUS Emulator::LaunchDefaultModule(const std::filesystem::path& path) {
   X_STATUS result = CompleteLaunch(path, module_path);
 
   if (XSUCCEEDED(result)) {
-    kernel_state_->deployment_type_ = XDeploymentType::kInstalledToHDD;
-    auto title_id = kernel_state_->title_id();
-    if (!kernel::IsSystemTitle(title_id)) {
-      // Assumption that any loaded game is loaded as a disc.
-      kernel_state_->deployment_type_ = XDeploymentType::kOpticalDisc;
-    }
+    // No media info on this path, so assume a disc unless it's a system title.
+    SetDeploymentType(kernel::IsSystemTitle(kernel_state_->title_id())
+                          ? XDeploymentType::kInstalledToHDD
+                          : XDeploymentType::kOpticalDisc);
   }
   return result;
 }
@@ -863,12 +876,11 @@ X_STATUS Emulator::DataMigration(const uint64_t xuid) {
       const auto previous_path = content_root_ / title.name / content_type.name;
       const auto path = content_root_ / used_xuid / title.name;
 
-      if (!std::filesystem::exists(path)) {
-        std::filesystem::create_directories(path);
-      }
-
       std::error_code ec;
-      std::filesystem::rename(previous_path, path / content_type.name, ec);
+      std::filesystem::create_directories(path, ec);
+      if (!ec) {
+        std::filesystem::rename(previous_path, path / content_type.name, ec);
+      }
 
       if (ec) {
         failure_count++;
@@ -880,57 +892,55 @@ X_STATUS Emulator::DataMigration(const uint64_t xuid) {
     // Other directories:
     // Headers - Just copy everything to both common and xuid locations
     // profile - ?
-    if (std::filesystem::exists(title.path / title.name / "Headers")) {
-      const auto xuid_path =
-          content_root_ / xuid_string / title.name / "Headers";
-
-      std::filesystem::create_directories(xuid_path);
-
-      std::error_code ec;
-      // Copy to specific user
-      std::filesystem::copy(title.path / title.name / "Headers", xuid_path,
-                            std::filesystem::copy_options::recursive |
-                                std::filesystem::copy_options::skip_existing,
-                            ec);
-      if (ec) {
-        failure_count++;
-        XELOGW("{}: Copying from: {} to: {} failed! Error message: {} ({:08X})",
-               __func__, title.path / title.name / "Headers", xuid_path,
-               ec.message(), ec.value());
-      }
-
-      const auto header_types =
-          xe::filesystem::ListDirectories(title.path / title.name / "Headers");
-
-      if (!(header_types.size() == 1 &&
-            header_types.at(0).name == "00000001")) {
-        const auto common_path =
-            content_root_ / common_xuid_string / title.name / "Headers";
-
-        std::filesystem::create_directories(common_path);
-
-        // Copy to common, skip cases where only savefile header is available
-        std::filesystem::copy(title.path / title.name / "Headers", common_path,
-                              std::filesystem::copy_options::recursive |
-                                  std::filesystem::copy_options::skip_existing,
-                              ec);
+    std::error_code exists_error;
+    const auto headers_path = title.path / title.name / "Headers";
+    if (std::filesystem::exists(headers_path, exists_error)) {
+      // Copies the headers to |path|, counting a failure if it can't.
+      auto copy_headers = [&,
+                           func = __func__](const std::filesystem::path& path) {
+        std::error_code ec;
+        std::filesystem::create_directories(path, ec);
+        if (!ec) {
+          std::filesystem::copy(
+              headers_path, path,
+              std::filesystem::copy_options::recursive |
+                  std::filesystem::copy_options::skip_existing,
+              ec);
+        }
         if (ec) {
           failure_count++;
           XELOGW(
               "{}: Copying from: {} to: {} failed! Error message: {} ({:08X})",
-              __func__, title.path / title.name / "Headers", common_path,
-              ec.message(), ec.value());
+              func, headers_path, path, ec.message(), ec.value());
+          return false;
+        }
+        return true;
+      };
+
+      // Copy to specific user
+      bool copied =
+          copy_headers(content_root_ / xuid_string / title.name / "Headers");
+
+      const auto header_types = xe::filesystem::ListDirectories(headers_path);
+
+      // Copy to common, skip cases where only savefile header is available
+      if (!(header_types.size() == 1 &&
+            header_types.at(0).name == "00000001")) {
+        if (!copy_headers(content_root_ / common_xuid_string / title.name /
+                          "Headers")) {
+          copied = false;
         }
       }
 
-      if (!ec) {
-        // Remove previous directory
+      // The originals go only once every copy of them exists.
+      if (copied) {
         std::error_code ec;
-        std::filesystem::remove_all(title.path / title.name / "Headers", ec);
+        std::filesystem::remove_all(headers_path, ec);
       }
     }
 
-    if (std::filesystem::exists(title.path / title.name / "profile")) {
+    if (std::filesystem::exists(title.path / title.name / "profile",
+                                exists_error)) {
       // Find directory with previous username. There should be only one!
       const auto old_profile_data =
           xe::filesystem::ListDirectories(title.path / title.name / "profile");
@@ -1584,6 +1594,13 @@ void Emulator::RelaunchTitle(const std::string& host_path,
   if (graphics_system_ && graphics_system_->command_processor()) {
     graphics_system_->command_processor()->Shutdown();
   }
+  // The other host workers too, as they're not terminated below.
+  if (graphics_system_) {
+    graphics_system_->StopFrameLimiter();
+  }
+  if (audio_system_) {
+    audio_system_->StopWorker();
+  }
 
 #if XE_PLATFORM_xendroid
   // Mirror ResetTitle (emulator.cc:1529): stop the cooperative dispatch threads
@@ -1600,6 +1617,11 @@ void Emulator::RelaunchTitle(const std::string& host_path,
             kernel::XObject::Type::Thread);
     XELOGI("RelaunchTitle: terminating {} threads", threads.size());
     for (auto thread : threads) {
+      // Their owners stop host threads. Killing one could leave a lock it
+      // holds taken for good.
+      if (thread->is_host_thread()) {
+        continue;
+      }
       thread->Terminate(0);
     }
   }
@@ -1735,6 +1757,13 @@ void Emulator::ResetTitle() {
   if (graphics_system_ && graphics_system_->command_processor()) {
     graphics_system_->command_processor()->Shutdown();
   }
+  // The other host workers too, as they're not terminated below.
+  if (graphics_system_) {
+    graphics_system_->StopFrameLimiter();
+  }
+  if (audio_system_) {
+    audio_system_->StopWorker();
+  }
 
   // Stop the dispatch thread before tearing down guest threads. Their fibers
   // run on it, so terminating one from this host thread while the dispatcher is
@@ -1748,6 +1777,11 @@ void Emulator::ResetTitle() {
             kernel::XObject::Type::Thread);
     XELOGI("ResetTitle: terminating {} threads", threads.size());
     for (auto thread : threads) {
+      // Their owners stop host threads. Killing one could leave a lock it
+      // holds taken for good.
+      if (thread->is_host_thread()) {
+        continue;
+      }
       thread->Terminate(0);
     }
   }
@@ -2106,12 +2140,14 @@ bool Emulator::ExceptionCallback(Exception* ex) {
   assert_not_null(current_thread);
 
   auto guest_function = code_cache->LookupFunction(ex->pc());
-  assert_not_null(guest_function);
 
   auto context = current_thread->thread_state()->context();
 
+  // A fault in a JIT thunk has no guest function (release builds drop the
+  // assert), so there is no guest PC to map it to.
   const uint32_t guest_pc =
-      guest_function->MapMachineCodeToGuestAddress(ex->pc());
+      guest_function ? guest_function->MapMachineCodeToGuestAddress(ex->pc())
+                     : 0;
   const uint32_t guest_lr = uint32_t(context->lr);
   const uint32_t guest_ctr = uint32_t(context->ctr);
   const uint32_t guest_sp = uint32_t(context->r[1]);
@@ -2157,11 +2193,19 @@ bool Emulator::ExceptionCallback(Exception* ex) {
       current_thread->name(),
       current_thread->thread() ? current_thread->thread()->system_id() : 0,
       current_thread->thread_id(), current_thread->handle()));
-  crash_msg.append(fmt::format("PC:  0x{:08X}  {}\n", guest_pc,
-                               mod_off(guest_pc)));
+  if (guest_function) {
+    crash_msg.append(fmt::format("PC:  0x{:08X}  {}\n", guest_pc,
+                                 mod_off(guest_pc)));
+  } else {
+    crash_msg.append(fmt::format(
+        "PC:  unavailable (unmapped host JIT address 0x{:016X})\n", ex->pc()));
+  }
   // The start of the guest function the PC is in, for dump_functions_at.
   crash_msg.append(
-      fmt::format("Function: 0x{:08X}\n", guest_function->address()));
+      guest_function
+          ? fmt::format("Function: 0x{:08X}\n", guest_function->address())
+          : std::string("Function: none (host JIT code outside any guest "
+                        "function)\n"));
   crash_msg.append(fmt::format("LR:  0x{:08X}  {}\n", guest_lr,
                                mod_off(guest_lr)));
   crash_msg.append(
@@ -2308,14 +2352,11 @@ std::string Emulator::RemountAndResolveLaunchPath(
   std::replace(normalized_path.begin(), normalized_path.end(), '\\', '/');
 #endif
 
-  // Get the current game:\ symbolic link path
-  std::string symbolic_link_path;
-  if (!kernel_state_->file_system()->FindSymbolicLink(kDefaultGameSymbolicLink,
-                                                      symbolic_link_path)) {
+  if (kernel_state_->title_mount_path_.empty()) {
     return "";
   }
 
-  std::filesystem::path file_path = symbolic_link_path;
+  std::filesystem::path file_path = kernel_state_->title_mount_path_;
 
   // Remove previous symbolic links.
   // Some titles can provide root within specific directory.
@@ -2331,6 +2372,8 @@ std::string Emulator::RemountAndResolveLaunchPath(
       kDefaultPartitionSymbolicLink, xe::path_to_utf8(file_path.parent_path()));
   kernel_state_->file_system()->RegisterSymbolicLink(
       kDefaultGameSymbolicLink, xe::path_to_utf8(file_path.parent_path()));
+  kernel_state_->title_mount_path_ = xe::utf8::canonicalize_guest_path(
+      xe::path_to_utf8(file_path.parent_path()));
 
   return xe::path_to_utf8(file_path);
 }
@@ -2634,6 +2677,16 @@ X_STATUS Emulator::CompleteLaunch(const std::filesystem::path& path,
                                        module->hash().value());
     }
   }
+
+  // After plugins, which patch code in place.
+  if (module->xex_module()) {
+    module->xex_module()->PrecompileStaticInitializers();
+  }
+
+  // Resume the main thread now.
+  // If the debugger has requested a suspend this will just decrement the
+  // suspend count without resuming it until the debugger wants.
+  main_thread_->Resume();
 
   return X_STATUS_SUCCESS;
 }

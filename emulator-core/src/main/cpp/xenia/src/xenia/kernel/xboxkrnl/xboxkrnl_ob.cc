@@ -24,7 +24,23 @@ void xeObSplitName(X_ANSI_STRING input_string,
                    X_ANSI_STRING* leading_path_component,
                    X_ANSI_STRING* remaining_path_components,
                    PPCContext* context) {
-  xe::FatalError("xeObSplitName unimplemented!");
+  // Skips one leading separator, splits off the component up to the next one
+  // and leaves the rest after it.
+  const uint32_t pointer = input_string.pointer;
+  const uint16_t length = input_string.length;
+  const char* text = context->TranslateVirtual<const char*>(pointer);
+  const uint16_t start = (length && text[0] == '\\') ? 1 : 0;
+  uint16_t end = start;
+  while (end < length && text[end] != '\\') {
+    ++end;
+  }
+  leading_path_component->pointer = pointer + start;
+  leading_path_component->length = uint16_t(end - start);
+  leading_path_component->maximum_length = uint16_t(end - start);
+  const uint16_t rest = end < length ? uint16_t(end + 1) : end;
+  remaining_path_components->pointer = pointer + rest;
+  remaining_path_components->length = uint16_t(length - rest);
+  remaining_path_components->maximum_length = uint16_t(length - rest);
 }
 
 uint32_t xeObHashObjectName(X_ANSI_STRING* ElementName, PPCContext* context) {
@@ -214,6 +230,20 @@ dword_result_t ObOpenObjectByPointer_entry(lpvoid_t object_ptr,
     return X_STATUS_UNSUCCESSFUL;
   }
 
+  // A host object's own handle is not in the title's numbering and must never
+  // reach the guest, so give it a guest one. AddHandle retains, so this needs
+  // no RetainHandle of its own.
+  if (object->is_host_object()) {
+    X_HANDLE guest_handle = X_INVALID_HANDLE_VALUE;
+    X_STATUS result = kernel_state()->object_table()->AddHandle(
+        object.get(), &guest_handle, true);
+    if (XFAILED(result)) {
+      return result;
+    }
+    *out_handle_ptr = guest_handle;
+    return X_STATUS_SUCCESS;
+  }
+
   // Retain the handle. Will be released in NtClose.
   object->RetainHandle();
   *out_handle_ptr = object->handle();
@@ -348,20 +378,29 @@ void ObReferenceObject_entry(dword_t native_ptr) {
 }
 DECLARE_XBOXKRNL_EXPORT1(ObReferenceObject, kNone, kImplemented);
 
+void xeObStripDosDevicesPrefix(std::string& path) {
+  // Bytes, as a guest name need not be valid UTF-8.
+  if (path.starts_with("\\??\\")) {
+    path.erase(0, 4);
+  }
+}
+
+std::string xeObSymbolicLinkName(const std::string_view name) {
+  auto path = xe::utf8::canonicalize_guest_path(name);
+  xeObStripDosDevicesPrefix(path);
+
+  if (xe::utf8::starts_with_case(path, "\\System??\\")) {
+    path.erase(0, 10);
+  }
+  return path;
+}
+
 dword_result_t ObCreateSymbolicLink_entry(pointer_t<X_ANSI_STRING> path_ptr,
                                           pointer_t<X_ANSI_STRING> target_ptr) {
-  auto path = xe::utf8::canonicalize_guest_path(
-      util::TranslateAnsiPath(kernel_memory(), path_ptr));
+  auto path =
+      xeObSymbolicLinkName(util::TranslateAnsiPath(kernel_memory(), path_ptr));
   auto target = xe::utf8::canonicalize_guest_path(
       util::TranslateAnsiPath(kernel_memory(), target_ptr));
-
-  if (xe::utf8::starts_with(path, "\\??\\")) {
-    path = path.substr(4);  // Strip the full qualifier
-  }
-
-  if (xe::utf8::starts_with(path, "\\System??\\")) {
-    path = path.substr(10);  // Strip the full qualifier
-  }
 
   // 4D5307DC expects success.
   if (kernel_state()->file_system()->FindSymbolicLink(path, target)) {
@@ -377,7 +416,8 @@ dword_result_t ObCreateSymbolicLink_entry(pointer_t<X_ANSI_STRING> path_ptr,
 DECLARE_XBOXKRNL_EXPORT1(ObCreateSymbolicLink, kNone, kImplemented);
 
 dword_result_t ObDeleteSymbolicLink_entry(pointer_t<X_ANSI_STRING> path_ptr) {
-  auto path = util::TranslateAnsiPath(kernel_memory(), path_ptr);
+  auto path =
+      xeObSymbolicLinkName(util::TranslateAnsiPath(kernel_memory(), path_ptr));
   if (!kernel_state()->file_system()->UnregisterSymbolicLink(path)) {
     return X_STATUS_UNSUCCESSFUL;
   }

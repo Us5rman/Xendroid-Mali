@@ -148,7 +148,6 @@ target_link_libraries(emu
         xenia-ui
         xenia-ui-vulkan
         xenia-vfs
-        aes_128
         capstone
         fmt
         dxbc

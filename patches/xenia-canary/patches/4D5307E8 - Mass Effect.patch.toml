@@ -7,10 +7,10 @@ hash = [ # default.xex
     "E395D130B2F31B6F"  # Italy
 ]
 #media_id = [
-#    "572BA75D", # Disc (World):          http://redump.org/disc/11416
-#    "70630A1A", # Disc (Europe, Canada): http://redump.org/disc/67845
-#    "5ED90C8E", # Disc (Germany):        http://redump.org/disc/9688
-#    "5BE7B26E"  # Disc (Italy):          http://redump.org/disc/66654
+#    "572BA75D", # Disc (World):          https://redump.info/disc/11416
+#    "70630A1A", # Disc (Europe, Canada): https://redump.info/disc/67845
+#    "5ED90C8E", # Disc (Germany):        https://redump.info/disc/9688
+#    "5BE7B26E"  # Disc (Italy):          https://redump.info/disc/66654
 #]
 
 [[patch]]
@@ -32,55 +32,6 @@ hash = [ # default.xex
     [[patch.be8]] # tilingcode
         address = 0x82e5dcd7
         value = 0x00
-
-[[patch]]
-    name = "Flickering Decals Fix"
-    desc = "Fixes decals (bloodpools, bullet holes, etc.) that flicker when using the Vulkan FBO or D3D12 RTV render paths."
-    author = "boma"
-    is_enabled = false
-
-    [[patch.be32]]
-        address = 0x8263ca88
-        value = 0x4bf994dc
-    [[patch.be32]]
-        address = 0x825d5f68
-        value = 0x9421fff0
-    [[patch.be32]]
-        address = 0x825d5f6c
-        value = 0x3c00bc23
-    [[patch.be32]]
-        address = 0x825d5f70
-        value = 0x6000d70a
-    [[patch.be32]]
-        address = 0x825d5f74
-        value = 0x9001000c
-    [[patch.be32]]
-        address = 0x825d5f78
-        value = 0xc001000c
-    [[patch.be32]]
-        address = 0x825d5f7c
-        value = 0x38210010
-    [[patch.be32]]
-        address = 0x825d5f80
-        value = 0x48066b0c
-    [[patch.be32]]
-        address = 0x8263cf28
-        value = 0x4bf99094
-    [[patch.be32]]
-        address = 0x825d5fbc
-        value = 0x3d80c000
-    [[patch.be32]]
-        address = 0x825d5fc0
-        value = 0x618c0000
-    [[patch.be32]]
-        address = 0x825d5fc4
-        value = 0x918101b4
-    [[patch.be32]]
-        address = 0x825d5fc8
-        value = 0xc00101b4
-    [[patch.be32]]
-        address = 0x825d5fcc
-        value = 0x48066f60
 
 [[patch]]
     name = "Skip Intro Movies"

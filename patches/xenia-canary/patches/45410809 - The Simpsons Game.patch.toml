@@ -1,7 +1,7 @@
 title_name = "The Simpsons Game"
 title_id = "45410809" # EA-2057
 hash = "AC429E9FFB91904C" # default.xex
-#media_id = "05631042" # Disc (USA): http://redump.org/disc/12510
+#media_id = "05631042" # Disc (USA): https://redump.info/disc/12510
 
 [[patch]]
     name = "60 FPS"
@@ -16,3 +16,21 @@ hash = "AC429E9FFB91904C" # default.xex
     [[patch.be32]]
         address = 0x82159238
         value = 0x3c88ab86
+
+[[patch]]
+    name = "120 FPS"
+    desc = "Set vsync = false in the emulator config and force vertical sync through your GPU driver settings."
+    author = "tronuo"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x826b8394
+        value = 0x60000000
+
+    [[patch.be32]]
+        address = 0x82159238
+        value = 0x3c08ab86
+
+    [[patch.be32]]
+        address = 0x82cf0394
+        value = 0x42efc28f

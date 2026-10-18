@@ -5812,8 +5812,8 @@ VulkanCommandProcessor::AcquireScratchGpuBuffer(
   scratch_buffer_ = new_scratch_buffer;
   scratch_buffer_size_ = size;
   // Not used yet, no need for a barrier.
-  scratch_buffer_last_stage_mask_ = initial_access_mask;
-  scratch_buffer_last_access_mask_ = initial_stage_mask;
+  scratch_buffer_last_stage_mask_ = initial_stage_mask;
+  scratch_buffer_last_access_mask_ = initial_access_mask;
   scratch_buffer_last_usage_submission_ = submission_current;
   scratch_buffer_used_ = true;
   return ScratchBufferAcquisition(*this, new_scratch_buffer, initial_stage_mask,
@@ -6944,7 +6944,13 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       host_render_targets_used, pixel_shader && pixel_shader->writes_depth());
   gviargs.SetupRegisterValues(regs);
 
-  draw_util::GetHostViewportInfo(&gviargs, viewport_info);
+  if (gviargs == previous_viewport_info_args_) {
+    viewport_info = previous_viewport_info_;
+  } else {
+    draw_util::GetHostViewportInfo(&gviargs, viewport_info);
+    previous_viewport_info_args_ = gviargs;
+    previous_viewport_info_ = viewport_info;
+  }
   // vulkan_shading_rate: coarse shading of the multisampled scene's draws,
   // where the rate is allowed with what the pixel shader writes.
   draw_shading_rate_ = 0;
@@ -7139,7 +7145,9 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
                 static_cast<uint32_t>(vfetch_constant.type));
             return false;
         }
-        vfetch_addresses[vfetch_current_queued] = vfetch_constant.address;
+        // Mask to physical like the shader - the guest may use a mirror window.
+        vfetch_addresses[vfetch_current_queued] =
+            xenos::CpuToGpu(vfetch_constant.address << 2) >> 2;
         vfetch_sizes[vfetch_current_queued++] = vfetch_constant.size;
       }
     }
@@ -7162,7 +7170,8 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
           xenos::xe_gpu_vertex_fetch_t vfetch_constant =
               regs.GetVertexFetch(i * 32 + j);
           if (vfetch_constant.type == xenos::FetchConstantType::kVertex) {
-            vfetch_addresses[vfetch_current_queued] = vfetch_constant.address;
+            vfetch_addresses[vfetch_current_queued] =
+                xenos::CpuToGpu(vfetch_constant.address << 2) >> 2;
             vfetch_sizes[vfetch_current_queued++] = vfetch_constant.size;
           }
         }
@@ -7301,6 +7310,7 @@ bool VulkanCommandProcessor::IssueDraw(xenos::PrimitiveType prim_type,
       memexport_await_pending_ = true;
       memexport_readbacks_pending_ = true;
       memexport_readbacks_in_submission_ = true;
+      memexport_last_submission_ = GetCurrentSubmission();
     }
     PushBufferMemoryBarrier(
         shared_memory_->buffer(), memexport_extent_start,

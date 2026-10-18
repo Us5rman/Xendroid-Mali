@@ -18,7 +18,6 @@ hash = "2773BDBB472A895A" # default.xex
 
 [[patch]]
     name = "Disable Lens Flares"
-    desc = "Fixes unoccluded bright lights on-screen."
     author = "Sowa_95"
     is_enabled = false
 

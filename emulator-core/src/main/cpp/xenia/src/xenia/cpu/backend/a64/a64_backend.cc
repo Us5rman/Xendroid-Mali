@@ -53,6 +53,8 @@ DEFINE_bool(a64_enable_host_guest_stack_synchronization, true,
             "impact, but fixes crashes in games that use setjmp/longjmp.",
             "a64");
 
+DECLARE_bool(record_mmio_access_exceptions);
+
 DEFINE_bool(a64_fpu_nan_fixup, false,
             "Emulate PPC NaN propagation on scalar FPU arithmetic (add, sub, "
             "mul, div, fused multiply-add): the first NaN operand by "
@@ -137,6 +139,8 @@ class A64HelperEmitter : public A64Emitter {
   GuestToHostThunk EmitGuestToHostThunk();
   ResolveFunctionThunk EmitResolveFunctionThunk();
   void* EmitGuestAndHostSynchronizeStackHelper();
+  void* EmitVRsqrtefpHelper(void** out_vector_entry);
+  void* EmitFrsqrteHelper();
 };
 
 A64HelperEmitter::A64HelperEmitter(A64Backend* backend,
@@ -200,8 +204,9 @@ HostToGuestThunk A64HelperEmitter::EmitHostToGuestThunk() {
   // x21 = virtual_membase (loaded from context)
   ldr(x21, ptr(x20, static_cast<int32_t>(
                         offsetof(ppc::PPCContext, virtual_membase))));
-  // Restore the guest scalar FPCR on every host->guest entry so host-side
-  // work done before the call can't leak a stale rounding / non-IEEE mode.
+  // Keep the host FPCR for the return, and enter in the guest's scalar mode.
+  mrs(x12, 3, 3, 4, 4, 0);  // mrs x12, FPCR
+  str(x12, ptr(sp, static_cast<uint32_t>(StackLayout::THUNK_HOST_FPCR)));
   ldr(w11,
       ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext, fpcr_fpu))));
   msr(3, 3, 4, 4, 0, x11);
@@ -215,6 +220,15 @@ HostToGuestThunk A64HelperEmitter::EmitHostToGuestThunk() {
 
   // Call the guest function.
   blr(x9);
+
+  // Host code after the guest returns runs in the host's FPCR, not the guest's.
+  Xbyak_aarch64::Label host_fpcr_restored;
+  ldr(x11, ptr(sp, static_cast<uint32_t>(StackLayout::THUNK_HOST_FPCR)));
+  mrs(x12, 3, 3, 4, 4, 0);  // mrs x12, FPCR
+  cmp(x11, x12);
+  b(Xbyak_aarch64::EQ, host_fpcr_restored);
+  msr(3, 3, 4, 4, 0, x11);
+  L(host_fpcr_restored);
 
   code_offsets.epilog = getSize();
 
@@ -320,6 +334,15 @@ GuestToHostThunk A64HelperEmitter::EmitGuestToHostThunk() {
   stp(x29, x30, ptr(sp, 0x1C0));
 
   code_offsets.body = getSize();
+
+  // Host C code runs with the AAPCS64 default FPCR (round to nearest, no
+  // flush-to-zero), not the guest's scalar mode: mtfsf can put rounding
+  // controls or FPSCR.NI (FZ) in fpcr_fpu, which host code must not inherit.
+  Xbyak_aarch64::Label host_fpcr_ready;
+  mrs(x11, 3, 3, 4, 4, 0);  // mrs x11, FPCR
+  cbz(x11, host_fpcr_ready);
+  msr(3, 3, 4, 4, 0, xzr);
+  L(host_fpcr_ready);
 
   // Call host function.
   // AAPCS64: x0=first arg. We set x0=context (from x20).
@@ -517,6 +540,294 @@ void* A64HelperEmitter::EmitGuestAndHostSynchronizeStackHelper() {
   L(underflow);
   // Should be impossible — stackpoint array underflowed.
   brk(0xF001);  // assertion failure
+
+  code_offsets.epilog = getSize();
+  code_offsets.tail = getSize();
+
+  EmitFunctionInfo func_info = {};
+  func_info.code_size.total = getSize();
+  func_info.code_size.prolog = code_offsets.body - code_offsets.prolog;
+  func_info.code_size.body = code_offsets.epilog - code_offsets.body;
+  func_info.code_size.epilog = code_offsets.tail - code_offsets.epilog;
+  func_info.code_size.tail = getSize() - code_offsets.tail;
+  func_info.prolog_stack_alloc_offset =
+      code_offsets.prolog_stack_alloc - code_offsets.prolog;
+  func_info.stack_size = 0;
+
+  return Emplace(func_info);
+}
+
+// --------------------------------------------------------------------------
+// vrsqrtefp
+// --------------------------------------------------------------------------
+// One blob with two entry points:
+//   scalar (the returned pointer): w0 = float bits in, w0 = result out
+//   vector (*out_vector_entry):    v0.4s in, v0.4s out
+//
+// The scalar entry clobbers w0-w5 and touches no vector register; the vector
+// entry adds v0-v2 and x10. Both stay inside the scratch set the register
+// allocator never hands out (x0-x18, v0-v3), so guest values in v4-v31 survive
+// without EmitGuestToHostThunk's 28-register spill.
+void* A64HelperEmitter::EmitVRsqrtefpHelper(void** out_vector_entry) {
+  using namespace Xbyak_aarch64;
+  struct {
+    size_t prolog;
+    size_t prolog_stack_alloc;
+    size_t body;
+    size_t epilog;
+    size_t tail;
+  } code_offsets = {};
+
+  Label interpolate, interpolate_setup, slow, exp_nonzero, check_negative;
+  Label signed_inf, quiet_nan, ret_qnan, oddball, table;
+  Label lane;
+
+  code_offsets.prolog = getSize();
+  code_offsets.prolog_stack_alloc = getSize();
+  code_offsets.body = getSize();
+
+  L(lane);
+  // Positive normals need none of the classification below, so derive the
+  // interpolation's three inputs directly and rejoin at the table lookup.
+  ubfx(w1, w0, 23, 9);  // sign:exponent
+  sub(w1, w1, 1);
+  cmp(w1, 253);
+  b(HI, slow);
+  // coefficient index = ((exponent & 1) << 4) | (mantissa >> 19)
+  ubfx(w1, w0, 19, 4);
+  ubfx(w2, w0, 23, 1);
+  orr(w1, w1, w2, LSL, 4);
+  // interpolation factor
+  ubfx(w2, w0, 9, 10);
+  // result exponent term, (127 - exponent) >> 1
+  mov(w3, 63);
+  sub(w3, w3, w0, LSR, 24);
+  b(interpolate);
+
+  L(slow);
+  and_(w1, w0, 0x7FFFFF);  // mantissa
+  ubfx(w2, w0, 23, 8);     // biased exponent
+  cbnz(w2, exp_nonzero);
+  cbz(w1, signed_inf);  // +-0 -> +-inf
+  // Denormal. With NJM on it flushes to +-0 first and takes the same path.
+  ldr(w3, ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext, flags))));
+  tbnz(w3, kA64BackendNJMOn, signed_inf);
+  eor(w3, w1, 0x400000);
+  cbz(w3, oddball);
+  tbnz(w0, 31, ret_qnan);
+  // Renormalize into the same (mantissa, biased exponent) form a normal has.
+  clz(w3, w1);
+  sub(w4, w3, 8);
+  lsl(w1, w0, w4);
+  and_(w1, w1, 0x7FFFFE);
+  mov(w4, 9);
+  sub(w2, w4, w3);
+  b(interpolate_setup);
+
+  L(exp_nonzero);
+  cmp(w2, 255);
+  b(NE, check_negative);
+  cbnz(w1, quiet_nan);     // NaN -> quiet it, keeping sign and payload
+  tbnz(w0, 31, ret_qnan);  // -inf -> QNaN
+  mov(w0, 0);              // +inf -> +0
+  ret();
+
+  L(check_negative);
+  tbnz(w0, 31, ret_qnan);
+  // Positive normals took the fast path above, so nothing reaches the fall
+  // through; it computes the same result they would.
+
+  L(interpolate_setup);
+  // w1 = mantissa, w2 = biased exponent (<= 0 once renormalized)
+  ubfx(w4, w1, 19, 4);
+  and_(w5, w2, 1);
+  mov(w3, 127);
+  sub(w3, w3, w2);
+  asr(w3, w3, 1);
+  ubfx(w2, w1, 9, 10);
+  orr(w1, w4, w5, LSL, 4);
+
+  L(interpolate);
+  // w1 = coefficient index, w2 = interpolation factor, w3 = exponent term.
+  adr(x4, table);
+  ldr(w4, ptr(x4, x1, LSL, 2));
+  lsr(w5, w4, 16);  // slope
+  mul(w2, w2, w5);
+  lsl(w4, w4, 10);
+  and_(w4, w4, 0x3FFFC00);  // base
+  sub(w4, w4, w2);
+  // The interpolated estimate is always within [2^24, 2^26), so normalizing it
+  // is a one-bit shift and needs no leading zero count.
+  tst(w4, 0x2000000);
+  lsl(w5, w4, 1);
+  csel(w4, w4, w5, NE);
+  sub(w3, w3, 1);
+  cinc(w3, w3, NE);
+  // Round up by 4 when bit 1 and either bit 0 or bit 2 is set.
+  orr(w5, w4, w4, LSR, 2);
+  and_(w5, w5, w4, LSR, 1);
+  and_(w5, w5, 1);
+  add(w4, w4, w5, LSL, 2);
+  // Every input reaching here yields a biased exponent of 63..201 and a clear
+  // sign, so the result can never be denormal and needs no flush.
+  lsl(w3, w3, 23);
+  mov(w5, 0x3F800000);
+  add(w3, w3, w5);
+  ubfx(w4, w4, 2, 23);
+  orr(w0, w3, w4);
+  ret();
+
+  L(signed_inf);
+  and_(w0, w0, 0x80000000);
+  orr(w0, w0, 0x7F800000);
+  ret();
+
+  L(quiet_nan);
+  orr(w0, w0, 0x400000);
+  ret();
+
+  L(oddball);
+  tbnz(w0, 31, ret_qnan);
+  mov(w0, 0x5F34FD00);
+  ret();
+
+  L(ret_qnan);
+  mov(w0, 0x7FC00000);
+  ret();
+
+  const size_t vector_entry_offset = getSize();
+  // bl reaches the lane routine because both live in this one blob; the code
+  // cache is far larger than its +-128 MiB range.
+  mov(x10, x30);
+  mov(VReg(1).b16, VReg(0).b16);
+  for (uint32_t element = 0; element < 4; ++element) {
+    umov(w0, VReg(1).s4[element]);
+    bl(lane);
+    ins(VReg(2).s4[element], w0);
+  }
+  mov(VReg(0).b16, VReg(2).b16);
+  mov(x30, x10);
+  ret();
+
+  L(table);
+  static constexpr uint32_t kCoefficients[32] = {
+      0x0568B4FD, 0x04F3AF97, 0x048DAAA5, 0x0435A618, 0x03E7A1E4, 0x03A29DFE,
+      0x03659A5C, 0x032E96F8, 0x02FC93CA, 0x02D090CE, 0x02A88DFE, 0x02838B57,
+      0x026188D4, 0x02438673, 0x02268431, 0x020B820B, 0x03D27FFA, 0x03807C29,
+      0x033878AA, 0x02F97572, 0x02C27279, 0x02926FB7, 0x02666D26, 0x023F6AC0,
+      0x021D6881, 0x01FD6665, 0x01E16468, 0x01C76287, 0x01AF60C1, 0x01995F12,
+      0x01855D79, 0x01735BF4,
+  };
+  for (uint32_t coefficient : kCoefficients) {
+    dd(coefficient);
+  }
+
+  code_offsets.epilog = getSize();
+  code_offsets.tail = getSize();
+
+  EmitFunctionInfo func_info = {};
+  func_info.code_size.total = getSize();
+  func_info.code_size.prolog = code_offsets.body - code_offsets.prolog;
+  func_info.code_size.body = code_offsets.epilog - code_offsets.body;
+  func_info.code_size.epilog = code_offsets.tail - code_offsets.epilog;
+  func_info.code_size.tail = getSize() - code_offsets.tail;
+  func_info.prolog_stack_alloc_offset =
+      code_offsets.prolog_stack_alloc - code_offsets.prolog;
+  func_info.stack_size = 0;
+
+  void* fn = Emplace(func_info);
+  *out_vector_entry =
+      fn ? static_cast<uint8_t*>(fn) + vector_entry_offset : nullptr;
+  return fn;
+}
+
+// --------------------------------------------------------------------------
+// frsqrte
+// --------------------------------------------------------------------------
+// x0 = double bits in, x0 = result out. Clobbers x0-x5 and no vector register,
+// so it needs no guest->host thunk.
+void* A64HelperEmitter::EmitFrsqrteHelper() {
+  using namespace Xbyak_aarch64;
+  struct {
+    size_t prolog;
+    size_t prolog_stack_alloc;
+    size_t body;
+    size_t epilog;
+    size_t tail;
+  } code_offsets = {};
+
+  Label exp_nonmax, check_negative, compute;
+  Label signed_inf, quiet_nan, ret_qnan, table;
+
+  code_offsets.prolog = getSize();
+  code_offsets.prolog_stack_alloc = getSize();
+  code_offsets.body = getSize();
+
+  ubfx(x1, x0, 52, 11);              // biased exponent
+  and_(x2, x0, 0xFFFFFFFFFFFFFULL);  // mantissa
+  cmp(x1, 0x7FF);
+  b(NE, exp_nonmax);
+  cbnz(x2, quiet_nan);     // NaN -> quiet it, keeping sign and payload
+  tbnz(x0, 63, ret_qnan);  // -inf -> QNaN
+  mov(x0, 0);              // +inf -> +0
+  ret();
+
+  L(exp_nonmax);
+  cbnz(x1, check_negative);
+  cbz(x2, signed_inf);  // +-0 -> +-inf
+  // Denormal. Non-IEEE mode flushes it to +-0 and takes the same path.
+  ldr(w3, ptr(x19, static_cast<uint32_t>(offsetof(A64BackendContext, flags))));
+  tbnz(w3, kA64BackendNonIEEEMode, signed_inf);
+  tbnz(x0, 63, ret_qnan);
+  // Renormalize; the implicit 1 lands at bit 52 and the index masks it off.
+  clz(x3, x2);
+  sub(x4, x3, 11);
+  lsl(x2, x2, x4);
+  mov(w4, 12);
+  sub(w1, w4, w3);
+  b(compute);
+
+  L(check_negative);
+  tbnz(x0, 63, ret_qnan);
+
+  L(compute);
+  // index = (((exponent & 1) << 3) | (mantissa >> 49)) ^ 8
+  ubfx(x4, x2, 49, 3);
+  and_(w5, w1, 1);
+  orr(w4, w4, w5, LSL, 3);
+  eor(w4, w4, 8);
+  adr(x5, table);
+  ldrb(w4, ptr(x5, x4));
+  // result exponent = 1022 - ((exponent - 1023) >> 1)
+  sub(w1, w1, 1023);
+  asr(w1, w1, 1);
+  mov(w5, 1022);
+  sub(w1, w5, w1);
+  lsl(x1, x1, 52);
+  lsl(x4, x4, 44);
+  orr(x0, x1, x4);
+  ret();
+
+  L(signed_inf);
+  and_(x0, x0, 0x8000000000000000ULL);
+  orr(x0, x0, 0x7FF0000000000000ULL);
+  ret();
+
+  L(quiet_nan);
+  orr(x0, x0, 1ULL << 51);
+  ret();
+
+  L(ret_qnan);
+  mov(x0, 0x7FF8000000000000ULL);
+  ret();
+
+  L(table);
+  static constexpr uint8_t kEstimates[16] = {
+      241, 216, 192, 168, 152, 136, 128, 112, 96, 76, 60, 48, 32, 24, 16, 8};
+  for (uint32_t word = 0; word < 4; ++word) {
+    dd(kEstimates[word * 4] | (kEstimates[word * 4 + 1] << 8) |
+       (kEstimates[word * 4 + 2] << 16) | (kEstimates[word * 4 + 3] << 24));
+  }
 
   code_offsets.epilog = getSize();
   code_offsets.tail = getSize();
@@ -752,11 +1063,15 @@ uint64_t ResolveFunction(void* raw_context, uint64_t target_address) {
         for (auto* entry : processor->FindFunctionsWithAddress(
                  static_cast<uint32_t>(target_address))) {
           auto* afunc = static_cast<A64Function*>(entry);
+          // Landing on a function's first instruction would skip its prolog.
+          // (Comparing host addresses never caught it: the first guest
+          // instruction maps past the host prolog.)
+          if (afunc->address() == static_cast<uint32_t>(target_address)) {
+            continue;
+          }
           host_address = afunc->MapGuestAddressToMachineCode(
               static_cast<uint32_t>(target_address));
-          if (host_address &&
-              afunc->machine_code() !=
-                  reinterpret_cast<const uint8_t*>(host_address)) {
+          if (host_address) {
             auto* backend = static_cast<A64Backend*>(processor->backend());
             auto* backend_context =
                 backend->BackendContextForGuestContext(guest_context);
@@ -894,6 +1209,11 @@ A64Backend::~A64Backend() {
   }
 }
 
+static void ForwardMMIOAccessForRecording(void* context, void* hostaddr) {
+  reinterpret_cast<A64Backend*>(context)
+      ->RecordMMIOExceptionForGuestInstruction(hostaddr);
+}
+
 bool A64Backend::Initialize(Processor* processor) {
   if (!Backend::Initialize(processor)) {
     return false;
@@ -949,6 +1269,14 @@ bool A64Backend::Initialize(Processor* processor) {
       reinterpret_cast<void*>(&TryAcquireReservationHelper);
   reserved_store_32_helper = reinterpret_cast<void*>(&ReservedStore32Helper);
   reserved_store_64_helper = reinterpret_cast<void*>(&ReservedStore64Helper);
+  vrsqrtefp_scalar_helper_ =
+      thunk_emitter.EmitVRsqrtefpHelper(&vrsqrtefp_vector_helper_);
+  frsqrte_helper_ = thunk_emitter.EmitFrsqrteHelper();
+  if (!vrsqrtefp_scalar_helper_ || !vrsqrtefp_vector_helper_ ||
+      !frsqrte_helper_) {
+    XELOGE("A64Backend: Failed to generate the rsqrte helpers");
+    return false;
+  }
 
   // Set the indirection table default to point at the resolve thunk.
   // Use 64-bit encoding: the resolve thunk address is encoded as a rel32
@@ -968,6 +1296,14 @@ bool A64Backend::Initialize(Processor* processor) {
 
   // Register exception handler for MMIO access from JIT code.
   ExceptionHandler::Install(ExceptionCallbackThunk, this);
+
+  // Lets the memory system tell us which guest instructions faulted on MMIO,
+  // so they get recompiled into a direct call instead of taking the signal
+  // handler on every access.
+  if (cvars::record_mmio_access_exceptions) {
+    processor->memory()->SetMMIOExceptionRecordingCallback(
+        ForwardMMIOAccessForRecording, this);
+  }
 
   return true;
 }

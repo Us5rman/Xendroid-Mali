@@ -55,18 +55,22 @@ class InputSystem {
 
   X_RESULT GetCapabilities(uint32_t user_index, uint32_t flags,
                            X_INPUT_CAPABILITIES* out_caps);
+  // ui_active here and in GetKeystroke holds the input for UI outside the input
+  // blockers, such as xam's.
   X_RESULT GetState(uint32_t user_index, uint32_t flags,
-                    X_INPUT_STATE* out_state);
+                    X_INPUT_STATE* out_state, bool ui_active = false);
   // GetState variant for UI that bypasses the input blocker
   X_RESULT GetStateForUI(uint32_t user_index, uint32_t flags,
                          X_INPUT_STATE* out_state);
   X_RESULT SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration);
   X_RESULT GetKeystroke(uint32_t user_index, uint32_t flags,
-                        X_INPUT_KEYSTROKE* out_keystroke);
+                        X_INPUT_KEYSTROKE* out_keystroke,
+                        bool ui_active = false);
 
   // Block/unblock input to the game (for UI dialogs)
   void AddUIInputBlocker();
   void RemoveUIInputBlocker();
+  bool IsUIInputBlocked() const { return ui_input_blockers_.load() > 0; }
 
   bool GetVibrationCvar();
   void ToggleVibration();
@@ -174,6 +178,10 @@ class InputSystem {
 
   // Reference count for UI elements blocking game input
   std::atomic<int> ui_input_blockers_{0};
+  // Times blocking started or ended, added to packet numbers so a game sees a
+  // new state at both edges. Bumped after the count changes so the last read
+  // of each phase has a new number.
+  std::atomic<uint32_t> ui_input_blocking_edges_{0};
 
   // Buttons that should be masked from game input until released (per slot).
   // This prevents button presses used to close UI dialogs from being

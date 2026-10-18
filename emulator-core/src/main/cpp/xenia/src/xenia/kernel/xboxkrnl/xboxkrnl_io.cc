@@ -11,6 +11,7 @@
 #include "xenia/kernel/info/file.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xboxkrnl/xboxkrnl_ob.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xevent.h"
 #include "xenia/kernel/xfile.h"
@@ -54,25 +55,36 @@ dword_result_t NtCreateFile_entry(lpdword_t handle_out, dword_t desired_access,
   }
   assert_not_null(handle_out);
 
+  // A null name opens what the root directory handle refers to. That's how a
+  // file is reopened from a handle.
   auto object_name =
-      kernel_memory()->TranslateVirtual<X_ANSI_STRING*>(object_attrs->name_ptr);
+      util::TranslateAnsiStringPointer(kernel_memory(), object_attrs->name_ptr);
 
   vfs::Entry* root_entry = nullptr;
 
+  const bool has_root_handle =
+      object_attrs->root_directory != 0xFFFFFFFD &&  // ObDosDevices
+      object_attrs->root_directory != 0;
+
   // Compute path, possibly attrs relative.
   auto target_path = util::TranslateAnsiPath(kernel_memory(), object_name);
+  // A name relative to a directory handle is never under \??\.
+  if (!has_root_handle) {
+    xeObStripDosDevicesPrefix(target_path);
+  }
 
   // Enforce that the path is ASCII.
   if (!IsValidPath(target_path, false)) {
     return X_STATUS_OBJECT_NAME_INVALID;
   }
 
-  if (object_attrs->root_directory != 0xFFFFFFFD &&  // ObDosDevices
-      object_attrs->root_directory != 0) {
+  if (has_root_handle) {
     auto root_file = kernel_state()->object_table()->LookupObject<XFile>(
         object_attrs->root_directory);
-    assert_not_null(root_file);
-    assert_true(root_file->type() == XObject::Type::File);
+    // A closed handle or another object type: release builds drop asserts.
+    if (!root_file) {
+      return X_STATUS_INVALID_HANDLE;
+    }
 
     root_entry = root_file->entry();
   }
@@ -114,10 +126,11 @@ DECLARE_XBOXKRNL_EXPORT1(NtCreateFile, kFileSystem, kImplemented);
 dword_result_t NtOpenFile_entry(
     lpdword_t handle_out, dword_t desired_access,
     pointer_t<X_OBJECT_ATTRIBUTES> object_attributes,
-    pointer_t<X_IO_STATUS_BLOCK> io_status_block, dword_t open_options) {
+    pointer_t<X_IO_STATUS_BLOCK> io_status_block, dword_t share_access,
+    dword_t open_options) {
   return NtCreateFile_entry(
       handle_out, desired_access, object_attributes, io_status_block, nullptr,
-      0, 0, static_cast<uint32_t>(xe::vfs::FileDisposition::kOpen),
+      0, share_access, static_cast<uint32_t>(xe::vfs::FileDisposition::kOpen),
       open_options);
 }
 DECLARE_XBOXKRNL_EXPORT1(NtOpenFile, kFileSystem, kImplemented);
@@ -475,7 +488,7 @@ dword_result_t NtQueryFullAttributesFile_entry(
     pointer_t<X_OBJECT_ATTRIBUTES> obj_attribs,
     pointer_t<X_FILE_NETWORK_OPEN_INFORMATION> file_info) {
   auto object_name =
-      kernel_memory()->TranslateVirtual<X_ANSI_STRING*>(obj_attribs->name_ptr);
+      util::TranslateAnsiStringPointer(kernel_memory(), obj_attribs->name_ptr);
 
   object_ref<XFile> root_file;
   if (obj_attribs->root_directory != 0xFFFFFFFD &&  // ObDosDevices
@@ -488,6 +501,10 @@ dword_result_t NtQueryFullAttributesFile_entry(
   }
 
   auto target_path = util::TranslateAnsiPath(kernel_memory(), object_name);
+  // A name relative to a directory handle is never under \??\.
+  if (!root_file) {
+    xeObStripDosDevicesPrefix(target_path);
+  }
 
   // Enforce that the path is ASCII.
   if (!IsValidPath(target_path, false)) {
@@ -498,6 +515,7 @@ dword_result_t NtQueryFullAttributesFile_entry(
   auto entry = kernel_state()->file_system()->ResolvePath(target_path);
   if (entry) {
     // Found.
+    entry->update();
     file_info->creation_time = entry->create_timestamp();
     file_info->last_access_time = entry->access_timestamp();
     file_info->last_write_time = entry->write_timestamp();
@@ -581,9 +599,10 @@ dword_result_t NtOpenSymbolicLinkObject_entry(
   assert_true(object_attrs->attributes == 64);  // case insensitive
 
   auto object_name =
-      kernel_memory()->TranslateVirtual<X_ANSI_STRING*>(object_attrs->name_ptr);
+      util::TranslateAnsiStringPointer(kernel_memory(), object_attrs->name_ptr);
 
-  auto target_path = util::TranslateAnsiPath(kernel_memory(), object_name);
+  auto target_path = xeObSymbolicLinkName(
+      util::TranslateAnsiPath(kernel_memory(), object_name));
 
   // Enforce that the path is ASCII.
   if (!IsValidPath(target_path, false)) {
@@ -592,10 +611,6 @@ dword_result_t NtOpenSymbolicLinkObject_entry(
 
   if (object_attrs->root_directory != 0) {
     assert_always();
-  }
-
-  if (utf8::starts_with(target_path, "\\??\\")) {
-    target_path = target_path.substr(4);  // Strip the full qualifier
   }
 
   std::string link_path;

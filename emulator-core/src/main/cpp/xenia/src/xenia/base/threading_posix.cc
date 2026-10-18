@@ -710,6 +710,12 @@ class PosixCondition<Event> : public PosixConditionBase {
     signal_ = false;
   }
 
+  // NtQueryEvent. EVENT_TYPE: NotificationEvent = 0, SynchronizationEvent = 1.
+  EventInfo Query() {
+    auto lock = GuardedLock();
+    return EventInfo{manual_reset_ ? 0u : 1u, signal_ ? 1u : 0u};
+  }
+
   // WaitForSingleObject.
   WaitResult Wait(std::chrono::milliseconds timeout) override {
     auto lock = GuardedLock();
@@ -1818,11 +1824,7 @@ class PosixEvent final : public PosixConditionHandle<Event> {
   ~PosixEvent() override = default;
   void Set() override { handle_.Signal(); }
   void Reset() override { handle_.Reset(); }
-  EventInfo Query() override {
-    EventInfo result{};
-    assert_always();
-    return result;
-  }
+  EventInfo Query() override { return handle_.Query(); }
   void Pulse() override {
     using namespace std::chrono_literals;
     handle_.Signal();

@@ -10,6 +10,7 @@
 #ifndef XENIA_VFS_DEVICES_HOST_PATH_ENTRY_H_
 #define XENIA_VFS_DEVICES_HOST_PATH_ENTRY_H_
 
+#include <atomic>
 #include <string>
 
 #include "xenia/base/filesystem.h"
@@ -39,6 +40,9 @@ class HostPathEntry : public Entry {
                                            size_t offset,
                                            size_t length) override;
   void update() override;
+  bool has_open_files() const override;
+  void RetainFile() override { open_files_.fetch_add(1); }
+  void ReleaseFile() override;
 
   bool SetAttributes(uint64_t attributes) override;
   bool SetCreateTimestamp(uint64_t timestamp) override;
@@ -55,6 +59,7 @@ class HostPathEntry : public Entry {
       const std::vector<std::string_view>& path_parts) override;
 
   std::filesystem::path host_path_;
+  std::atomic<size_t> open_files_{0};
   // When set, size_ is a synthesized value (e.g. an STFS container size for a
   // collapsed content package) and update() must not overwrite it with the
   // backing file's real size.

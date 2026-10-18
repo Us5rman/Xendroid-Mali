@@ -37,7 +37,7 @@ if(XENIA_BUILD_MISC)
     xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
     xenia-gpu xenia-gpu-d3d12 xenia-hid xenia-hid-nop xenia-hid-portal
     xenia-kernel xenia-patcher xenia-ui xenia-ui-d3d12 xenia-vfs
-    aes_128 capstone dxbc fmt imgui libavcodec libavutil mspack snappy xxhash
+    capstone dxbc fmt imgui libavcodec libavutil mspack snappy xxhash
   )
   if(XE_TARGET_X86_64)
     target_link_libraries(xenia-gpu-d3d12-trace-viewer PRIVATE xenia-cpu-backend-x64)
@@ -53,7 +53,7 @@ if(XENIA_BUILD_MISC)
     xenia-apu xenia-apu-nop xenia-base xenia-core xenia-cpu
     xenia-gpu xenia-gpu-d3d12 xenia-hid xenia-hid-nop xenia-hid-portal
     xenia-kernel xenia-patcher xenia-ui xenia-ui-d3d12 xenia-vfs
-    aes_128 capstone dxbc fmt imgui libavcodec libavutil mspack snappy xxhash
+    capstone dxbc fmt imgui libavcodec libavutil mspack snappy xxhash
   )
   if(XE_TARGET_X86_64)
     target_link_libraries(xenia-gpu-d3d12-trace-dump PRIVATE xenia-cpu-backend-x64)

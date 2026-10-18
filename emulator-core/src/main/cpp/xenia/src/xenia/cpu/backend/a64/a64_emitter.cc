@@ -263,21 +263,27 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, size_t stack_size,
       L(GetLabel(label->id));
       label = label->next;
     }
+    // A compare hands its flags only to a branch in its own block.
+    ResetSequenceHandoffs();
 
     // Process each instruction in the block.
     const hir::Instr* instr = block->instr_head;
     while (instr) {
       // After a guest call, check for longjmp on the next real instruction.
       // Skip SOURCE_OFFSET because the return address from the call would
-      // point past the check, so it would never execute.
+      // point past the check, so it would never execute. With debug info on a
+      // COMMENT precedes the SOURCE_OFFSET, so skip that too.
       if (synchronize_stack_on_next_instruction_) {
-        if (instr->GetOpcodeNum() != hir::OPCODE_SOURCE_OFFSET) {
+        const hir::Opcode opcode_num = instr->GetOpcodeNum();
+        if (opcode_num != hir::OPCODE_SOURCE_OFFSET &&
+            opcode_num != hir::OPCODE_COMMENT) {
           synchronize_stack_on_next_instruction_ = false;
           EnsureSynchronizedGuestAndHostStack();
         }
       }
       const hir::Instr* new_tail = instr;
       bool selected = false;
+      const bool handoff_pending = sequence_handoff_pending();
       const hir::Opcode opcode = instr->GetOpcodeNum();
       const bool tso_load =
           cvars::a64_guest_memory_tso &&
@@ -312,10 +318,25 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, size_t stack_size,
                hir::GetOpcodeName(instr->GetOpcodeInfo()));
         return false;
       }
+      if (handoff_pending && sequence_handoff_pending() &&
+          !PassesHandoffs(instr)) {
+        // The previous sequence emitted nothing and left its work to this
+        // one, which did not do it: the code would compute a wrong result.
+        XELOGE(
+            "A64: HIR opcode {} did not take the handoff of the sequence "
+            "before it in guest function {:08X}",
+            hir::GetOpcodeName(instr->GetOpcodeInfo()),
+            current_guest_function_);
+        return false;
+      }
       if (tso_load) {
         dmb(ISHLD);
       }
       instr = new_tail;
+    }
+
+    if (!MaybeFlushV128ConstPool()) {
+      return false;
     }
 
     block = block->next;
@@ -326,6 +347,11 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, size_t stack_size,
   // ========================================================================
   L(*epilog_label_);
   epilog_label_ = nullptr;
+  // A call as the last instruction leaves the check unconsumed.
+  if (synchronize_stack_on_next_instruction_) {
+    synchronize_stack_on_next_instruction_ = false;
+    EnsureSynchronizedGuestAndHostStack();
+  }
   // FTrace: log the guest return value (r3) on normal return.
   if (IsTracingFunc()) {
     mov(x1, static_cast<uint64_t>(current_guest_function_));
@@ -367,8 +393,18 @@ bool A64Emitter::Emit(hir::HIRBuilder* builder, size_t stack_size,
              current_guest_function_, e.what());
       return false;
     }
+    if (!MaybeFlushV128ConstPool()) {
+      return false;
+    }
   }
   code_offsets.tail = getSize();
+
+  // ========================================================================
+  // LITERAL POOL
+  // ========================================================================
+  if (!FlushV128ConstPool(false)) {
+    return false;
+  }
 
   // Fill in EmitFunctionInfo metrics.
   assert_zero(code_offsets.prolog);
@@ -419,6 +455,9 @@ void A64Emitter::ResetPerFunctionState() {
     delete cached_label;
   }
   label_cache_.clear();
+  v128_consts_.clear();
+  v128_consts_first_use_ = 0;
+  ResetSequenceHandoffs();
 
   // Clean up HIR->xbyak label map. HIR label ids restart at each function, so
   // stale entries would hand the next function this one's labels.
@@ -739,6 +778,7 @@ void A64Emitter::CallExtern(const hir::Instr* instr, const Function* function) {
 void A64Emitter::CallNative(void* fn) { CallNativeSafe(fn); }
 
 void A64Emitter::CallNativeSafe(void* fn) {
+  ForgetFpcrMode();
   // GuestToHostThunk: x0=target function, x1/x2=args (set by caller).
   // The thunk rearranges: saves x0 in x9, sets x0=context, calls x9.
   mov(x0, reinterpret_cast<uint64_t>(fn));
@@ -858,6 +898,68 @@ Label& A64Emitter::GetLabel(uint32_t label_id) {
   return *label;
 }
 
+// Half of LDR (literal)'s +-1MB reach, leaving room for the item in flight.
+static constexpr size_t kV128ConstPoolReach = 512 * 1024;
+
+Label& A64Emitter::GetV128ConstLabel(const vec128_t& value) {
+  for (auto& entry : v128_consts_) {
+    if (entry.first == value) {
+      return *entry.second;
+    }
+  }
+  if (v128_consts_.empty()) {
+    v128_consts_first_use_ = getSize();
+  }
+  auto* label = new Label();
+  label_cache_.push_back(label);
+  v128_consts_.emplace_back(value, label);
+  return *label;
+}
+
+bool A64Emitter::FlushV128ConstPool(bool branch_over) {
+  if (v128_consts_.empty()) {
+    return true;
+  }
+  Label* skip = nullptr;
+  if (branch_over) {
+    skip = new Label();
+    label_cache_.push_back(skip);
+    b(*skip);
+  }
+  // Functions start 16-byte aligned in the code cache.
+  while (getSize() % 16) {
+    dd(0);
+  }
+  try {
+    for (auto& entry : v128_consts_) {
+      L(*entry.second);
+      for (int word = 0; word < 4; ++word) {
+        dd(entry.first.u32[word]);
+      }
+    }
+  } catch (const Xbyak_aarch64::Error& e) {
+    XELOGE(
+        "A64: v128 literal pool out of range in guest function {:08X} "
+        "({} constants, {} bytes since the first use): {}",
+        current_guest_function_, v128_consts_.size(),
+        getSize() - v128_consts_first_use_, e.what());
+    return false;
+  }
+  v128_consts_.clear();
+  if (skip) {
+    L(*skip);
+  }
+  return true;
+}
+
+bool A64Emitter::MaybeFlushV128ConstPool() {
+  if (v128_consts_.empty() ||
+      getSize() - v128_consts_first_use_ < kV128ConstPoolReach) {
+    return true;
+  }
+  return FlushV128ConstPool(true);
+}
+
 void A64Emitter::HandleStackpointOverflowError(ppc::PPCContext* context) {
   if (debugging::IsDebuggerAttached()) {
     debugging::Break();
@@ -877,10 +979,10 @@ void A64Emitter::PushStackpoint() {
   ldr(w9, ptr(x19, static_cast<uint32_t>(
                        offsetof(A64BackendContext, current_stackpoint_depth))));
 
-  // Compute offset into array: x10 = w9 * sizeof(A64BackendStackpoint)
-  mov(w10, static_cast<uint32_t>(sizeof(A64BackendStackpoint)));
-  umull(x10, w9, w10);
-  add(x8, x8, x10);
+  // x8 += w9 * sizeof(A64BackendStackpoint) via scaled extended-register add.
+  static_assert(sizeof(A64BackendStackpoint) == 16,
+                "stackpoint indexing relies on a 16-byte element size");
+  add(x8, x8, w9, UXTW, 4);
 
   // Store host SP.
   mov(x10, sp);

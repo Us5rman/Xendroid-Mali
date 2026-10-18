@@ -144,6 +144,15 @@ toolchain. The full setup for Linux and Windows hosts is in [BUILD.md](BUILD.md)
 - Frame generation, fonts, upscaling and the other third-party components keep their
   own licenses, listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
+## License
+
+Xendroid+'s own code is Copyright (C) 2026 phforner0 and the Xendroid+ contributors,
+licensed under the [GNU Affero General Public License v3.0 or later](LICENSE). Anyone
+who distributes a modified version, or lets people use one over a network, has to
+publish its source code under the same license. Code that came from Xenia, XenDroid and
+the third-party components keeps its own license; see
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
 ## Legal
 
 Xendroid+ is a non-commercial, open-source project for research, software development

@@ -209,7 +209,14 @@ bool XmaContextNew::Work() {
     Decode(&data);
     Consume(&output_rb, &data);
 
-    if (!data.IsAnyInputBufferValid() || data.error_status == 4) {
+    // Don't abandon a partially consumed frame. Consume() hands over at most
+    // subframe_decode_count blocks per pass so the pass that exhausts the
+    // input typically leaves the rest of the frame undelivered. Work() has
+    // already cleared is_enabled_ and only XMAEnableContext sets it again.
+    // Game polling for the remainder therefore never kicks and nothing
+    // else can ever deliver it so keep draining until the frame is out.
+    if ((!data.IsAnyInputBufferValid() || data.error_status == 4) &&
+        current_frame_remaining_subframes_ == 0) {
       XELOGAPU(
           "XmaContext {}: Work loop exit - buffers_valid={} error_status={}",
           id(), data.IsAnyInputBufferValid(), data.error_status);
@@ -499,6 +506,20 @@ void XmaContextNew::Decode(XMA_CONTEXT_DATA* data) {
   }
 
   kPacketInfo packet_info = GetPacketInfo(packet, relative_offset);
+
+  // Games can write loop_start one bit short of the frame boundary.
+  if (loop_start_skip_pending_ &&
+      packet_info.current_frame_offset_ != relative_offset) {
+    XELOGAPU(
+        "XmaContext {}: loop_start {} is not a frame boundary in packet {}, "
+        "resolving to {}",
+        id(), relative_offset, packet_index, packet_info.current_frame_offset_);
+    relative_offset = packet_info.current_frame_offset_;
+    data->input_buffer_read_offset =
+        (packet_index * kBitsPerPacket) + relative_offset;
+    packet_info = GetPacketInfo(packet, relative_offset);
+  }
+
   const uint32_t packet_to_skip = skip_count + 1;
   const uint32_t next_packet_index = packet_index + packet_to_skip;
 
@@ -510,10 +531,6 @@ void XmaContextNew::Decode(XMA_CONTEXT_DATA* data) {
 
   // Frame header split across packet boundary — combine packets to read
   // the full 15-bit header and resolve the real frame size.
-  // Only detected for XMA2 packets where the header provides an authoritative
-  // frame count. XMA1 packets lack a frame count field so split headers
-  // cannot be detected — if XMA1 encoders can produce them, those frames
-  // will still be silently lost.
   if (packet_info.current_frame_size_ == 0) {
     XELOGAPU(
         "XmaContext {}: Split frame header at packet {} boundary, "
@@ -799,7 +816,15 @@ const uint32_t XmaContextNew::GetNextPacketReadOffset(
                next_packet_index, current_input_packet_count);
       return new_input_buffer_offset;
     }
-    next_packet_index++;
+
+    // No frame *starts* in this packet, it is entirely the continuation of
+    // a frame split across the packet boundary.  Follow this packet's own
+    // skip count to the next packet of the same sub-stream.
+    const uint8_t next_skip = xma::GetPacketSkipCount(next_packet);
+    if (next_skip == 0xFF) {
+      break;
+    }
+    next_packet_index += next_skip + 1;
   }
 
   return kBitsPerPacketHeader;
@@ -839,19 +864,43 @@ uint8_t* XmaContextNew::GetCurrentInputBuffer(XMA_CONTEXT_DATA* data) {
 const kPacketInfo XmaContextNew::GetPacketInfo(uint8_t* packet,
                                                uint32_t frame_offset) {
   kPacketInfo packet_info = {};
+  packet_info.current_frame_offset_ = frame_offset;
 
   const uint32_t first_frame_offset = xma::GetPacketFrameOffset(packet);
   BitStream stream(packet, kBitsPerPacket);
   stream.SetOffset(first_frame_offset);
 
+  // Report the first frame starting at or after frame_offset.
+  bool resolved = false;
+  auto consider_frame = [&](uint32_t offset, uint32_t size) {
+    if (!resolved && offset >= frame_offset) {
+      resolved = true;
+      packet_info.current_frame_offset_ = offset;
+    }
+    if (offset != frame_offset) {
+      return;
+    }
+    packet_info.current_frame_ = packet_info.frame_count_;
+    packet_info.current_frame_size_ = size;
+  };
+
   // Handling of splitted frame
   if (frame_offset < first_frame_offset) {
     packet_info.current_frame_ = 0;
     packet_info.current_frame_size_ = first_frame_offset - frame_offset;
+    resolved = true;
   }
 
   while (true) {
     if (stream.BitsRemaining() < kBitsPerFrameHeader) {
+      // This frame's 15-bit header runs into the next packet, so its size
+      // isn't readable yet. Count it anyway, or the caller takes the previous
+      // frame for the packet's last and skips straight past this one. Size 0
+      // sends it to the split-header path.
+      if (stream.BitsRemaining() > 0) {
+        consider_frame(static_cast<uint32_t>(stream.offset_bits()), 0);
+        packet_info.frame_count_++;
+      }
       break;
     }
 
@@ -860,10 +909,8 @@ const kPacketInfo XmaContextNew::GetPacketInfo(uint8_t* packet,
       break;
     }
 
-    if (stream.offset_bits() == frame_offset) {
-      packet_info.current_frame_ = packet_info.frame_count_;
-      packet_info.current_frame_size_ = (uint32_t)frame_size;
-    }
+    consider_frame(static_cast<uint32_t>(stream.offset_bits()),
+                   (uint32_t)frame_size);
 
     packet_info.frame_count_++;
 

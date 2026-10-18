@@ -89,6 +89,15 @@ X_STATUS InstallContentPackageStandalone(
   }
 
   ec.clear();
+  // A title can install this package by copying the package file itself
+  // (XamContentResolve creates its folder), and the emulator mounts that file
+  // as it is. The extracted folder installed here takes its place.
+  if (std::filesystem::is_regular_file(data_path, ec)) {
+    XELOGI("InstallContentPackageStandalone: replacing package file {}",
+           data_path.string());
+    std::filesystem::remove(data_path, ec);
+  }
+  ec.clear();
   std::filesystem::create_directories(data_path, ec);
   if (ec) {
     XELOGE("InstallContentPackageStandalone: mkdir failed: {}", ec.message());
@@ -334,8 +343,27 @@ std::vector<InstalledContentItem> ListInstalledContent(
     if (ec) {
       break;
     }
-    if (!it->is_directory(ec)) {
-      continue;
+    std::error_code entry_ec;
+    const bool is_folder = it->is_directory(entry_ec);
+    // A package a title copied as one file, which the emulator mounts as it
+    // is: its own header has the name.
+    std::string container_name;
+    uint64_t container_size = 0;
+    if (!is_folder) {
+      if (!it->is_regular_file(entry_ec)) {
+        continue;
+      }
+      auto header = XContentContainerDevice::ReadContainerHeader(it->path());
+      if (!header || !header->content_header.is_magic_valid()) {
+        continue;
+      }
+      container_name = xe::to_utf8(
+          XContentContainerDevice::ContentDataFromHeader(*header)
+              .display_name());
+      container_size = it->file_size(entry_ec);
+      if (entry_ec) {
+        container_size = 0;
+      }
     }
     const std::string pkg_dir = it->path().filename().string();
     const std::filesystem::path header_path =
@@ -346,11 +374,12 @@ std::vector<InstalledContentItem> ListInstalledContent(
     std::string name;
     if (ReadHeaderDisplayName(header_path, name) && !name.empty()) {
       item.display_name = name;
-      item.size = DirectorySizeOnDisk(it->path());
+    } else if (!container_name.empty()) {
+      item.display_name = container_name;
     } else {
       item.display_name = pkg_dir;
-      item.size = DirectorySizeOnDisk(it->path());
     }
+    item.size = is_folder ? DirectorySizeOnDisk(it->path()) : container_size;
     items.push_back(std::move(item));
   }
 

@@ -501,6 +501,12 @@ class D3D12CommandProcessor final : public CommandProcessor {
     CheckSubmissionCompletion(GetCurrentSubmission());
     return GetCompletedSubmission() + 1u >= GetCurrentSubmission();
   }
+  // command_processor_memexport.inc: the submission of the last export, not the
+  // whole queue.
+  bool AwaitMemexportSubmission(uint64_t submission) {
+    CheckSubmissionCompletion(submission);
+    return GetCompletedSubmission() >= submission;
+  }
   // Need to await submission completion before calling.
   void ClearCommandAllocatorCache();
 

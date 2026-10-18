@@ -263,12 +263,12 @@ Function* Processor::ResolveFunction(uint32_t address) {
     auto function = LookupFunction(address);
 
     if (!function) {
-      entry->status = Entry::STATUS_FAILED;
+      entry_table_.MarkFailed(entry);
       return nullptr;
     }
 
     if (!DemandFunction(function)) {
-      entry->status = Entry::STATUS_FAILED;
+      entry_table_.MarkFailed(entry);
       return nullptr;
     }
     // only add it to the list of resolved functions if resolving succeeded
@@ -284,9 +284,8 @@ Function* Processor::ResolveFunction(uint32_t address) {
       }
     }
 
-    entry->function = function;
-    entry->end_address = function->end_address();
-    status = entry->status = Entry::STATUS_READY;
+    entry_table_.MarkReady(entry, function, function->end_address());
+    status = Entry::STATUS_READY;
   }
   if (status == Entry::STATUS_READY) {
     // Ready to use.
@@ -499,7 +498,10 @@ void Processor::OnThreadCreated(uint32_t thread_handle,
 void Processor::OnThreadExit(uint32_t thread_id) {
   auto global_lock = global_critical_region_.Acquire();
   auto it = thread_debug_infos_.find(thread_id);
-  assert_true(it != thread_debug_infos_.end());
+  if (it == thread_debug_infos_.end()) {
+    XELOGW("Processor::OnThreadExit ignored unknown thread {:08X}", thread_id);
+    return;
+  }
   auto thread_info = it->second.get();
   thread_info->state = ThreadDebugInfo::State::kExited;
 }
@@ -507,7 +509,11 @@ void Processor::OnThreadExit(uint32_t thread_id) {
 void Processor::OnThreadDestroyed(uint32_t thread_id) {
   auto global_lock = global_critical_region_.Acquire();
   auto it = thread_debug_infos_.find(thread_id);
-  assert_true(it != thread_debug_infos_.end());
+  if (it == thread_debug_infos_.end()) {
+    XELOGW("Processor::OnThreadDestroyed ignored unknown thread {:08X}",
+           thread_id);
+    return;
+  }
   it->second->thread_handle = 0;
   thread_debug_infos_.erase(it);
 }

@@ -80,6 +80,19 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
              buffer_length);
       return 0x80151802;  // X_ONLINE_E_LOGON_NOT_LOGGED_ON
     }
+    case 0x0005800E: {
+      // XUserMuteListQuery. The buffer ends in the result code and
+      // buffer_length holds the address of the BOOL result. No mute list is
+      // kept so nobody is muted.
+      if (buffer_ptr) {
+        xe::store_and_swap<uint32_t>(buffer + 0x10, X_ERROR_SUCCESS);
+      }
+      if (buffer_length) {
+        xe::store_and_swap<uint32_t>(memory_->TranslateVirtual(buffer_length),
+                                     0);
+      }
+      return X_E_SUCCESS;
+    }
     case 0x00058020: {
       // 0x00058004 is called right before this.
       // We should create a XamEnumerate-able empty list here, but I'm not

@@ -17,16 +17,19 @@ namespace xe {
 namespace test {
 
 // All tests use kMemoryAllocationReserve which only touches the page table,
-// not host memory. This lets us pass nullptr for membase and Memory*.
+// not host memory, so membase can be nullptr. PhysicalHeap allocations notify
+// the Memory's invalidation callbacks, so they need an uninitialized Memory
+// with none registered.
 
 TEST_CASE("PhysicalHeap::GetPhysicalAddress", "[memory]") {
+  Memory memory;
   VirtualHeap parent;
   parent.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0x00000000,
                     0x20000000, 4096);
 
   SECTION("heap with no offset returns heap-relative address") {
     PhysicalHeap heap;
-    heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xA0000000,
+    heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xA0000000,
                     0x20000000, 64 * 1024, &parent);
 
     REQUIRE(heap.host_address_offset() == 0);
@@ -37,7 +40,7 @@ TEST_CASE("PhysicalHeap::GetPhysicalAddress", "[memory]") {
 
   SECTION("0xE0000000 heap always has 0x1000 physical offset") {
     PhysicalHeap heap;
-    heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xE0000000,
+    heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xE0000000,
                     0x1FD00000, 4096, &parent);
 
     // The 0x1000 physical offset is baked into the view mapping
@@ -49,13 +52,14 @@ TEST_CASE("PhysicalHeap::GetPhysicalAddress", "[memory]") {
 }
 
 TEST_CASE("PhysicalHeap::Alloc alignment", "[memory]") {
+  Memory memory;
   VirtualHeap parent;
   parent.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0x00000000,
                     0x20000000, 4096);
 
   SECTION("returned address is page-aligned") {
     PhysicalHeap heap;
-    heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xA0000000,
+    heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xA0000000,
                     0x20000000, 64 * 1024, &parent);
 
     uint32_t addr = 0;
@@ -70,7 +74,7 @@ TEST_CASE("PhysicalHeap::Alloc alignment", "[memory]") {
 
   SECTION("multiple allocations with different alignments") {
     PhysicalHeap heap;
-    heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xA0000000,
+    heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xA0000000,
                     0x20000000, 64 * 1024, &parent);
 
     for (uint32_t alignment : {0x10000u, 0x20000u, 0x40000u, 0x100000u}) {
@@ -84,13 +88,14 @@ TEST_CASE("PhysicalHeap::Alloc alignment", "[memory]") {
 }
 
 TEST_CASE("PhysicalHeap::AllocRange alignment", "[memory]") {
+  Memory memory;
   VirtualHeap parent;
   parent.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0x00000000,
                     0x20000000, 4096);
 
   SECTION("returned address respects alignment within range") {
     PhysicalHeap heap;
-    heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xA0000000,
+    heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xA0000000,
                     0x20000000, 64 * 1024, &parent);
 
     uint32_t addr = 0;
@@ -105,7 +110,7 @@ TEST_CASE("PhysicalHeap::AllocRange alignment", "[memory]") {
 
   SECTION("large alignment preserved through translation") {
     PhysicalHeap heap;
-    heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xC0000000,
+    heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xC0000000,
                     0x20000000, 16 * 1024 * 1024, &parent);
 
     uint32_t addr = 0;
@@ -118,12 +123,13 @@ TEST_CASE("PhysicalHeap::AllocRange alignment", "[memory]") {
 }
 
 TEST_CASE("PhysicalHeap::AllocFixed alignment", "[memory]") {
+  Memory memory;
   VirtualHeap parent;
   parent.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0x00000000,
                     0x20000000, 4096);
 
   PhysicalHeap heap;
-  heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xA0000000,
+  heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xA0000000,
                   0x20000000, 64 * 1024, &parent);
 
   // AllocFixed at a specific aligned address must succeed
@@ -133,12 +139,13 @@ TEST_CASE("PhysicalHeap::AllocFixed alignment", "[memory]") {
 }
 
 TEST_CASE("PhysicalHeap vE0000000 alignment", "[memory]") {
+  Memory memory;
   VirtualHeap parent;
   parent.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0x00000000,
                     0x20000000, 4096);
 
   PhysicalHeap heap;
-  heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xE0000000,
+  heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xE0000000,
                   0x1FD00000, 4096, &parent);
 
   // The 0xE0000000 heap always has a 0x1000 physical offset, so the
@@ -176,12 +183,13 @@ TEST_CASE("PhysicalHeap vE0000000 alignment", "[memory]") {
 }
 
 TEST_CASE("PhysicalHeap vE0000000 AllocRange alignment", "[memory]") {
+  Memory memory;
   VirtualHeap parent;
   parent.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0x00000000,
                     0x20000000, 4096);
 
   PhysicalHeap heap;
-  heap.Initialize(nullptr, nullptr, HeapType::kGuestPhysical, 0xE0000000,
+  heap.Initialize(&memory, nullptr, HeapType::kGuestPhysical, 0xE0000000,
                   0x1FD00000, 4096, &parent);
 
   SECTION("page-aligned AllocRange succeeds") {

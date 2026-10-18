@@ -628,6 +628,12 @@ void XeResolveHostColorFullLoad8RedSamples(
     param_const_buffer_xe(xe_resolve_host_color)
     param_next_after_texture_xe
     param_texture_xe(xe_resolve_host_color_source)) {
+  // D3D maps A8 to k_8 with LOW_BLUE, selecting alpha (see
+  // XeResolveUnpack32bpp8ScalarSamples). k_8_A and k_8_B are still unknown, so
+  // they keep the red/blue swap.
+  bool source_alpha =
+      resolve_info.dest_swap && resolve_info.dest_format == kXenosFormat_8;
+  bool source_blue = resolve_info.dest_swap && !source_alpha;
   dont_flatten_xe if (resolve_info.edram_format_ints_log2 != 0u) {
     uint4_xe packed_0123, packed_4567;
     uint2_xe packed_0 = XeResolveHostColorFetchPacked64(
@@ -694,16 +700,17 @@ void XeResolveHostColorFullLoad8RedSamples(
         pass_const_buffer_xe(xe_resolve_host_color)
         pass_next_after_texture_xe
         pass_texture_xe(xe_resolve_host_color_source));
-    dont_flatten_xe if (resolve_info.dest_swap) {
+    // The second dword of each 64bpp pixel holds blue and alpha.
+    dont_flatten_xe if (source_blue || source_alpha) {
       packed_0123 = uint4_xe(packed_0.y, packed_1.y, packed_2.y, packed_3.y);
       packed_4567 = uint4_xe(packed_4.y, packed_5.y, packed_6.y, packed_7.y);
     } else {
       packed_0123 = uint4_xe(packed_0.x, packed_1.x, packed_2.x, packed_3.x);
       packed_4567 = uint4_xe(packed_4.x, packed_5.x, packed_6.x, packed_7.x);
     }
-    XeResolveUnpack64bpp8RedUnswappedSamples(
-        packed_0123, packed_4567, resolve_info.edram_format, pixels_0123,
-        pixels_4567);
+    XeResolveUnpack64bpp8ScalarSamples(
+        packed_0123, packed_4567, resolve_info.edram_format, source_alpha,
+        pixels_0123, pixels_4567);
   } else {
     uint4_xe packed_0123, packed_4567;
     packed_0123.x = XeResolveHostColorFetchPacked32(
@@ -770,9 +777,9 @@ void XeResolveHostColorFullLoad8RedSamples(
         pass_const_buffer_xe(xe_resolve_host_color)
         pass_next_after_texture_xe
         pass_texture_xe(xe_resolve_host_color_source));
-    XeResolveUnpack32bpp8RedSamples(
-        packed_0123, packed_4567, resolve_info.edram_format,
-        resolve_info.dest_swap, pixels_0123, pixels_4567);
+    XeResolveUnpack32bpp8ScalarSamples(
+        packed_0123, packed_4567, resolve_info.edram_format, source_blue,
+        source_alpha, pixels_0123, pixels_4567);
   }
 }
 

@@ -47,6 +47,9 @@ class AudioSystem {
 
   virtual X_STATUS Setup(kernel::KernelState* kernel_state);
   virtual void Shutdown();
+  // Stops the worker that runs the guest audio callbacks. Idempotent, and
+  // Shutdown does it too.
+  void StopWorker();
 
   X_STATUS RegisterClient(uint32_t callback, uint32_t callback_arg,
                           size_t* out_index);
@@ -93,7 +96,9 @@ class AudioSystem {
   std::atomic<bool> worker_running_ = {false};
   kernel::object_ref<kernel::XHostThread> worker_thread_;
 
-  xe::global_critical_region global_critical_region_;
+  // Guards clients_. The global lock is never taken while holding it, so its
+  // holders can't delay the pump.
+  std::mutex clients_mutex_;
   static constexpr size_t kMaximumClientCount = 8;
   struct ClientSlot {
     AudioDriver* driver = nullptr;

@@ -36,8 +36,8 @@ namespace a64 {
 // Codes are stored as a byte array (big-endian for multi-byte codes), listed
 // in reverse prolog order (last prolog instruction's code first).
 //
-// For the thunk prolog (224 bytes):
-//   sub sp, sp, #0xE0         (alloc_s)
+// For the thunk prolog (240 bytes):
+//   sub sp, sp, #0xF0         (alloc_s)
 //   stp x19,x20, [sp, #0x00]  (save_regp)
 //   stp x21,x22, [sp, #0x10]  (save_regp)
 //   stp x23,x24, [sp, #0x20]  (save_regp)
@@ -144,7 +144,7 @@ static size_t BuildThunkUnwindCodes(uint8_t* buf) {
   EmitSaveRegp(buf, off, 2, 0x10);
   // stp x19, x20, [sp, #0x00]  — x19 = x(19+0)
   EmitSaveRegp(buf, off, 0, 0x00);
-  // sub sp, sp, #0xE0 (224 bytes)
+  // sub sp, sp, #THUNK_STACK_SIZE
   EmitAllocS(buf, off, StackLayout::THUNK_STACK_SIZE);
   EmitEnd(buf, off);
   return off;

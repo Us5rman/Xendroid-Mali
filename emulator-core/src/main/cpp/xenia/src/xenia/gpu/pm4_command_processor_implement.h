@@ -724,6 +724,13 @@ bool COMMAND_PROCESSOR::ExecutePacketType3(uint32_t packet) XE_RESTRICT {
         result = true;
         break;
       }
+      case PM4_WAIT_IB_PFD_COMPLETE: {
+        // Waits for earlier INDIRECT_BUFFER_PFD base and size writes.
+        // No wait is needed since we process indirect buffers synchronously.
+        reader_.AdvanceRead(count * sizeof(uint32_t));
+        result = true;
+        break;
+      }
       case PM4_WAIT_FOR_IDLE: {
         // This opcode is used by 5454084E while going / being ingame.
         assert_true(count == 1);
@@ -1975,8 +1982,17 @@ uint32_t COMMAND_PROCESSOR::ExecutePrimaryBuffer(uint32_t read_index,
   // prefetch the wraparound range
   // it likely is already in L3 cache, but in a zen system it may be another
   // chiplets l3
-  reader_.BeginPrefetchedRead<swcache::PrefetchTag::Level2>(
-      GetCurrentRingReadCount());
+  uint32_t remaining = GetCurrentRingReadCount();
+  reader_.BeginPrefetchedRead<swcache::PrefetchTag::Level2>(remaining);
+
+  // The guest polls the read pointer write-back to see how much ring space it
+  // has, and hardware advances it as the ring drains. Publishing only once the
+  // burst ends leaves the guest waiting on work we have already done, so
+  // republish every RB_BLKSZ dwords on the way through. A zero stride means
+  // the guest never armed the write-back.
+  const uint32_t writeback_stride =
+      read_ptr_update_freq_ * uint32_t(sizeof(uint32_t));
+  uint32_t remaining_at_writeback = remaining;
   do {
     if (!COMMAND_PROCESSOR::ExecutePacket()) {
       // This probably should be fatal - but we're going to continue anyways.
@@ -1984,7 +2000,28 @@ uint32_t COMMAND_PROCESSOR::ExecutePrimaryBuffer(uint32_t read_index,
       assert_always();
       break;
     }
-  } while (reader_.read_count());
+    remaining = GetCurrentRingReadCount();
+    // remaining only grows back if a malformed packet ran the read offset past
+    // the end of the burst, and then there is nothing honest to publish.
+    if (writeback_stride && remaining <= remaining_at_writeback &&
+        remaining_at_writeback - remaining >= writeback_stride) {
+      // Re-read the target, the guest can re-point or disable the write-back
+      // from its own thread while we are draining.
+      uint32_t writeback_ptr = read_ptr_writeback_ptr_;
+      if (writeback_ptr) {
+        // Publishing the read pointer hands that ring space back, so it has to
+        // land after our reads of it.
+        std::atomic_thread_fence(std::memory_order_release);
+        xe::store_and_swap<uint32_t>(
+            memory_->TranslatePhysical(writeback_ptr),
+            uint32_t(reader_.read_offset() / sizeof(uint32_t)));
+        // Like the final write-back, so a guest thread parked waiting for ring
+        // space (spin_park_mode) wakes now rather than at its timeout.
+        NotifyGuestGpuProgress();
+      }
+      remaining_at_writeback = remaining;
+    }
+  } while (remaining);
 
   COMMAND_PROCESSOR::OnPrimaryBufferEnd();
 

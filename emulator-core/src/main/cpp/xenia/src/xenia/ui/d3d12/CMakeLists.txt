@@ -15,7 +15,7 @@ if(XENIA_BUILD_MISC)
     xenia-apu xenia-base xenia-core xenia-cpu
     xenia-gpu xenia-hid xenia-hid-portal
     xenia-kernel xenia-patcher xenia-ui xenia-ui-d3d12 xenia-vfs
-    aes_128 capstone dxbc fmt glslang-spirv imgui mspack snappy xxhash
+    capstone dxbc fmt glslang-spirv imgui mspack snappy xxhash
   )
   if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     target_link_libraries(xenia-ui-window-d3d12-demo PRIVATE xenia-cpu-backend-x64)

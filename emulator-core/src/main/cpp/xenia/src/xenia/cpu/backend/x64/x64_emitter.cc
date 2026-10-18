@@ -305,7 +305,13 @@ bool X64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
     const Instr* instr = block->instr_head;
     while (instr) {
       if (synchronize_stack_on_next_instruction_) {
-        if (instr->GetOpcodeNum() != hir::OPCODE_SOURCE_OFFSET) {
+        // The check has to land after MarkSourceOffset has stamped the
+        // guest->host mapping, or a longjmp lands past it and never runs it.
+        // With debug info on, a COMMENT precedes the SOURCE_OFFSET, so both
+        // have to be skipped, not just the source offset.
+        const hir::Opcode opcode_num = instr->GetOpcodeNum();
+        if (opcode_num != hir::OPCODE_SOURCE_OFFSET &&
+            opcode_num != hir::OPCODE_COMMENT) {
           synchronize_stack_on_next_instruction_ = false;
           EnsureSynchronizedGuestAndHostStack();
         }
@@ -328,6 +334,11 @@ bool X64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
   // Function epilog.
   L(epilog_label);
   epilog_label_ = nullptr;
+  // A call as the last instruction leaves the check unconsumed.
+  if (synchronize_stack_on_next_instruction_) {
+    synchronize_stack_on_next_instruction_ = false;
+    EnsureSynchronizedGuestAndHostStack();
+  }
   // FTrace: log the guest return value (r3) on normal return.
   if (IsTracingFunc()) {
     mov(GetNativeParam(0), current_guest_function_);

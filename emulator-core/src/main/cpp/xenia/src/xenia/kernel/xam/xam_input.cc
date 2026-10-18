@@ -14,6 +14,7 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_private.h"
+#include "xenia/ui/virtual_key.h"
 #include "xenia/xbox.h"
 
 namespace xe {
@@ -25,6 +26,9 @@ using xe::hid::X_INPUT_FLAG;
 using xe::hid::X_INPUT_KEYSTROKE;
 using xe::hid::X_INPUT_STATE;
 using xe::hid::X_INPUT_VIBRATION;
+
+// Input flag of system callers, which see the guide button.
+constexpr uint32_t kInputFlagSystem = 0x80000000;
 
 dword_result_t XAutomationpUnbindController_entry(dword_t user_index) {
   if (user_index >= XUserMaxUserCount) {
@@ -107,11 +111,10 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
     return X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
-  if (kernel_state()->xam_state()->IsUIActive()) {
-    return X_ERROR_SUCCESS;
-  }
-
   // Games call this with a NULL state ptr, probably as a query.
+  X_INPUT_STATE query_state;
+  X_INPUT_STATE* state =
+      input_state ? static_cast<X_INPUT_STATE*>(input_state) : &query_state;
 
   uint32_t actual_user_index = user_index;
   // chrispy: change this, logic is not right
@@ -125,12 +128,30 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
   auto input_system = kernel_state()->emulator()->input_system();
   {
     auto lock = input_system->lock();
+    auto xam_state = kernel_state()->xam_state();
+    bool ui_active = xam_state->IsUIActive();
     result = input_system->GetState(
-        user_index, !flags ? X_INPUT_FLAG::X_INPUT_FLAG_GAMEPAD : flags,
-        input_state);
+        user_index, !flags ? X_INPUT_FLAG::X_INPUT_FLAG_GAMEPAD : flags, state,
+        ui_active);
+    if (input_state && result == X_ERROR_SUCCESS) {
+      // While xam's UI holds the input, the title reads the packet number from
+      // before.
+      uint32_t& packet_number =
+          xam_state->title_input_packet_numbers_[user_index];
+      if (ui_active) {
+        input_state->packet_number = packet_number;
+      } else {
+        packet_number = input_state->packet_number;
+      }
+    }
   }
 
   if (input_state && result == X_ERROR_SUCCESS) {
+    // Only system callers see the guide button, which belongs to the console.
+    if (!(flags & kInputFlagSystem)) {
+      input_state->gamepad.buttons =
+          input_state->gamepad.buttons & ~hid::X_INPUT_GAMEPAD_GUIDE;
+    }
     if (auto patch = kernel_state()->xmp_volume_patch()) {
       patch->OnInputPoll(input_state->packet_number);
     }
@@ -158,30 +179,6 @@ dword_result_t XamInputSetState_entry(
 }
 DECLARE_XAM_EXPORT1(XamInputSetState, kInput, kImplemented);
 
-// https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputgetkeystroke(v=vs.85).aspx
-dword_result_t XamInputGetKeystroke_entry(
-    dword_t user_index, dword_t flags, pointer_t<X_INPUT_KEYSTROKE> keystroke) {
-  // https://github.com/CodeAsm/ffplay360/blob/master/Common/AtgXime.cpp
-  // user index = index or XUSER_INDEX_ANY
-  // flags = XINPUT_FLAG_GAMEPAD (| _ANYUSER | _ANYDEVICE)
-
-  if (!keystroke) {
-    return X_ERROR_BAD_ARGUMENTS;
-  }
-
-  uint32_t actual_user_index = user_index;
-  if ((actual_user_index & XUserIndexAny) == XUserIndexAny ||
-      (flags & X_INPUT_FLAG::X_INPUT_FLAG_ANY_USER)) {
-    // Always pin user to 0.
-    actual_user_index = 0;
-  }
-
-  auto input_system = kernel_state()->emulator()->input_system();
-  auto lock = input_system->lock();
-  return input_system->GetKeystroke(user_index, flags, keystroke);
-}
-DECLARE_XAM_EXPORT1(XamInputGetKeystroke, kInput, kImplemented);
-
 // Same as non-ex, just takes a pointer to user index.
 dword_result_t XamInputGetKeystrokeEx_entry(
     lpdword_t user_index_ptr, dword_t flags,
@@ -192,11 +189,8 @@ dword_result_t XamInputGetKeystrokeEx_entry(
 
   keystroke.Zero();
 
-  if (kernel_state()->xam_state()->IsUIActive()) {
-    return X_ERROR_SUCCESS;
-  }
-
   uint32_t user_index = *user_index_ptr;
+  bool ui_active = kernel_state()->xam_state()->IsUIActive();
   auto input_system = kernel_state()->emulator()->input_system();
   auto lock = input_system->lock();
   if ((user_index & XUserIndexAny) == XUserIndexAny) {
@@ -204,30 +198,79 @@ dword_result_t XamInputGetKeystrokeEx_entry(
     user_index = 0;
   }
 
+  // Only system callers get keystrokes of the guide button.
+  auto get_keystroke = [&](uint32_t user) {
+    while (true) {
+      X_RESULT result =
+          input_system->GetKeystroke(user, flags, keystroke, ui_active);
+      if (result != X_ERROR_SUCCESS || (flags & kInputFlagSystem) ||
+          keystroke->virtual_key != uint16_t(ui::VirtualKey::kXInputPadGuide)) {
+        return result;
+      }
+      keystroke.Zero();
+    }
+  };
+
   if (flags & X_INPUT_FLAG::X_INPUT_FLAG_ANY_USER) {
     // That flag means we should iterate over every connected controller and
     // check which one have pending request.
-    auto result = X_ERROR_DEVICE_NOT_CONNECTED;
+    X_RESULT result = X_ERROR_DEVICE_NOT_CONNECTED;
     for (uint32_t i = 0; i < XUserMaxUserCount; i++) {
-      auto result = input_system->GetKeystroke(i, flags, keystroke);
+      const X_RESULT user_result = get_keystroke(i);
 
       // Return result from first user that have pending request
-      if (result == X_ERROR_SUCCESS) {
+      if (user_result == X_ERROR_SUCCESS) {
         *user_index_ptr = keystroke->user_index;
-        return result;
+        return user_result;
+      }
+      // A user that answered with nothing pending makes the result EMPTY.
+      if (user_result == X_ERROR_EMPTY) {
+        result = X_ERROR_EMPTY;
       }
     }
     return result;
   }
 
-  auto result = input_system->GetKeystroke(user_index, flags, keystroke);
+  auto result = get_keystroke(user_index);
 
-  if (XSUCCEEDED(result)) {
+  // XSUCCEEDED would also pass EMPTY, a Win32 code without the error bit.
+  if (result == X_ERROR_SUCCESS) {
     *user_index_ptr = keystroke->user_index;
   }
   return result;
 }
 DECLARE_XAM_EXPORT1(XamInputGetKeystrokeEx, kInput, kImplemented);
+
+dword_result_t XamInputGetKeystroke_entry(
+    dword_t user_index, dword_t flags, pointer_t<X_INPUT_KEYSTROKE> keystroke) {
+  // Ex reads the index through a guest pointer, so it must be big-endian.
+  xe::be<uint32_t> actual_user_index = static_cast<uint32_t>(user_index);
+  return XamInputGetKeystrokeEx_entry(
+      reinterpret_cast<uint32_t*>(&actual_user_index), flags, keystroke);
+}
+DECLARE_XAM_EXPORT1(XamInputGetKeystroke, kInput, kImplemented);
+
+// The guide's keystroke read, as on the console: any device, and any user for
+// XUserIndexAny or with 0x10000000. 0x20000000 takes precedence and skips only
+// the big button remap and keyboard translation, which xenia has neither of.
+// As a system read it keeps the guide button.
+dword_result_t XamInputGetKeystrokeHudEx_entry(
+    dword_t user_index, dword_t flags, pointer_t<X_INPUT_KEYSTROKE> keystroke) {
+  uint32_t input_flags =
+      X_INPUT_FLAG::X_INPUT_FLAG_ANYDEVICE | kInputFlagSystem;
+  if (static_cast<uint32_t>(user_index) == XUserIndexAny ||
+      (flags & 0x30000000) == 0x10000000) {
+    input_flags |= X_INPUT_FLAG::X_INPUT_FLAG_ANY_USER;
+  }
+  return XamInputGetKeystroke_entry(user_index, input_flags, keystroke);
+}
+DECLARE_XAM_EXPORT1(XamInputGetKeystrokeHudEx, kInput, kImplemented);
+
+dword_result_t XamInputGetKeystrokeHud_entry(
+    dword_t user_index, pointer_t<X_INPUT_KEYSTROKE> keystroke) {
+  return XamInputGetKeystrokeHudEx_entry(user_index, 0, keystroke);
+}
+DECLARE_XAM_EXPORT1(XamInputGetKeystrokeHud, kInput, kImplemented);
 
 X_HRESULT_result_t XamUserGetDeviceContext_entry(dword_t user_index,
                                                  dword_t device_type,

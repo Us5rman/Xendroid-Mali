@@ -109,6 +109,9 @@ bool Entry::Delete(Entry* entry) {
   if (is_read_only()) {
     return false;
   }
+  if (entry->has_open_files()) {
+    return false;
+  }
   if (entry->parent() != this) {
     return false;
   }
@@ -148,7 +151,7 @@ void Entry::Rename(const std::filesystem::path file_path) {
   absolute_path_ =
       xe::utf8::join_guest_paths(device_->mount_path(), guest_path);
   path_ = guest_path;
-  name_ = xe::path_to_utf8(file_path.filename());
+  name_ = xe::utf8::find_name_from_guest_path(guest_path);
 }
 
 }  // namespace vfs

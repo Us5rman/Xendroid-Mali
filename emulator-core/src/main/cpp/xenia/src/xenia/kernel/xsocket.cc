@@ -606,6 +606,8 @@ X_STATUS XSocket::Listen(int backlog) {
 
 object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
   if (!acceptor_) {
+    // WSAEOPNOTSUPP for a datagram socket, WSAEINVAL before listen().
+    last_error_ = udp_socket_ ? 10045 : uint32_t(X_WSAError::X_WSAEINVAL);
     return nullptr;
   }
 
@@ -646,6 +648,7 @@ object_ref<XSocket> XSocket::Accept(N_XSOCKADDR* name, int* name_len) {
 
 int XSocket::Shutdown(int how) {
   if (!tcp_socket_ && !udp_socket_) {
+    last_error_ = 10057;  // WSAENOTCONN
     return -1;
   }
 
@@ -680,6 +683,7 @@ int XSocket::Shutdown(int how) {
 
 int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
   if (!tcp_socket_ && !udp_socket_) {
+    last_error_ = 10057;  // WSAENOTCONN
     return -1;
   }
 
@@ -698,6 +702,10 @@ int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
     });
   }
 
+  // A stream peer that closed the connection reads as 0 bytes.
+  if (ec == asio::error::eof) {
+    return 0;
+  }
   if (ec) {
     last_error_ = AsioErrorToWSAError(ec);
     return -1;
@@ -709,6 +717,7 @@ int XSocket::Recv(uint8_t* buf, uint32_t buf_len, uint32_t flags) {
 int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags,
                       N_XSOCKADDR_IN* from, uint32_t* from_len) {
   if (!udp_socket_ && !tcp_socket_) {
+    last_error_ = 10057;  // WSAENOTCONN
     return -1;
   }
 
@@ -738,6 +747,10 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags,
     });
   }
 
+  // A stream peer that closed the connection reads as 0 bytes.
+  if (ec == asio::error::eof) {
+    return 0;
+  }
   if (ec) {
     last_error_ = AsioErrorToWSAError(ec);
     return -1;
@@ -748,6 +761,7 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags,
 
 int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
   if (!tcp_socket_ && !udp_socket_) {
+    last_error_ = 10057;  // WSAENOTCONN
     return -1;
   }
 
@@ -775,6 +789,7 @@ int XSocket::Send(const uint8_t* buf, uint32_t buf_len, uint32_t flags) {
 int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags,
                     N_XSOCKADDR_IN* to, uint32_t to_len) {
   if (!udp_socket_ && !tcp_socket_) {
+    last_error_ = 10057;  // WSAENOTCONN
     return -1;
   }
 
@@ -912,42 +927,42 @@ bool XSocket::QueuePacket(uint32_t src_ip, uint16_t src_port,
   return true;
 }
 
-X_STATUS XSocket::GetSockName(uint8_t* buf, int* buf_len) {
+X_STATUS XSocket::QueryName(bool peer, N_XSOCKADDR_IN* name) {
   auto handle = native_handle();
   if (handle == static_cast<uint64_t>(-1)) {
+    last_error_ = AsioErrorToWSAError(asio::error::not_socket);
     return X_STATUS_INVALID_HANDLE;
   }
 
-  socklen_t len = static_cast<socklen_t>(*buf_len);
-  int result = getsockname(static_cast<int>(handle),
-                           reinterpret_cast<sockaddr*>(buf), &len);
+  sockaddr_in host_name = {};
+  socklen_t len = sizeof(host_name);
+  auto host_address = reinterpret_cast<sockaddr*>(&host_name);
+  int result = peer ? getpeername(static_cast<int>(handle), host_address, &len)
+                    : getsockname(static_cast<int>(handle), host_address, &len);
   if (result == -1) {
+#if XE_PLATFORM_WIN32
+    const int host_error = WSAGetLastError();
+#else
+    const int host_error = errno;
+#endif  // XE_PLATFORM_WIN32
     last_error_ = AsioErrorToWSAError(
-        asio::error_code(errno, asio::error::get_system_category()));
+        asio::error_code(host_error, asio::error::get_system_category()));
     return X_STATUS_UNSUCCESSFUL;
   }
 
-  *buf_len = static_cast<int>(len);
+  name->sin_family = host_name.sin_family;
+  name->sin_port = ntohs(host_name.sin_port);
+  name->sin_addr = ntohl(host_name.sin_addr.s_addr);
+  std::memset(name->x_sin_zero, 0, sizeof(name->x_sin_zero));
   return X_STATUS_SUCCESS;
 }
 
-X_STATUS XSocket::GetPeerName(uint8_t* buf, int* buf_len) {
-  auto handle = native_handle();
-  if (handle == static_cast<uint64_t>(-1)) {
-    return X_STATUS_INVALID_HANDLE;
-  }
+X_STATUS XSocket::GetSockName(N_XSOCKADDR_IN* name) {
+  return QueryName(false, name);
+}
 
-  socklen_t len = static_cast<socklen_t>(*buf_len);
-  int result = getpeername(static_cast<int>(handle),
-                           reinterpret_cast<sockaddr*>(buf), &len);
-  if (result == -1) {
-    last_error_ = AsioErrorToWSAError(
-        asio::error_code(errno, asio::error::get_system_category()));
-    return X_STATUS_UNSUCCESSFUL;
-  }
-
-  *buf_len = static_cast<int>(len);
-  return X_STATUS_SUCCESS;
+X_STATUS XSocket::GetPeerName(N_XSOCKADDR_IN* name) {
+  return QueryName(true, name);
 }
 
 uint32_t XSocket::GetLastWSAError() const { return last_error_; }

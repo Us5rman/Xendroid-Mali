@@ -71,6 +71,25 @@ static int ClampPriority(int32_t priority) {
   return priority < 0 ? 0 : (priority > 31 ? 31 : priority);
 }
 
+// Priority levels selectable during a background-scheduling window, verbatim
+// from the console. Admits 0-9 and locks out 10-17, and also clears 19, 22, 25
+// and 28 for reasons nobody has characterised - kept as-is rather than tidied.
+static constexpr uint32_t kBackgroundReadyMask = 0xEDB403FFu;
+// Window length. The console arms its decrementer for 50000 ticks, which at
+// the Xenon timebase of 49.875 MHz is almost exactly 1 ms.
+static constexpr uint32_t kBackgroundWindowUs = 1002;
+// Floor on the spacing between windows, just under a frame so a real vblank is
+// never skipped. Our vblank hook runs free with the refresh cap off.
+static constexpr uint32_t kBackgroundPeriodUs = 16000;
+
+// Consumes the head-requeue request left by a preemption or a re-poll wake.
+static bool TakeHeadRequeue(XThread::SchedulerLinks& links) {
+  bool at_head = links.preempted || links.repoll_preempt;
+  links.preempted = false;
+  links.repoll_preempt = false;
+  return at_head;
+}
+
 // Safepoints that may decline to preempt before one is forced through anyway.
 // A guest spinning at DISPATCH_LEVEL passes safepoints at roughly the loop
 // rate, so this is a short wait in wall-clock terms, and the alternative is an
@@ -220,6 +239,9 @@ void GuestScheduler::EnsureStarted() {
   ticks_per_us_ = ticks_per_us;
   quantum_ticks_ =
       static_cast<uint64_t>(ticks_per_us * cvars::guest_scheduler_quantum_us);
+  background_ticks_ = static_cast<uint64_t>(ticks_per_us * kBackgroundWindowUs);
+  background_period_ticks_ =
+      static_cast<uint64_t>(ticks_per_us * kBackgroundPeriodUs);
   if (quantum_ticks_) {
     XELOGI("GuestScheduler: preemption slice = {} us ({} ticks)",
            uint32_t(cvars::guest_scheduler_quantum_us), quantum_ticks_);
@@ -381,9 +403,7 @@ void GuestScheduler::EnqueueReady(XThread* thread, int cpu_index,
     }
     links.queued = true;
     links.cpu = cpu_index;
-    bool at_head = links.preempted;
-    links.preempted = false;
-    LinkReadyLocked(cpus_[cpu_index], thread, at_head);
+    LinkReadyLocked(cpus_[cpu_index], thread, TakeHeadRequeue(links));
     if (yield_to_other) {
       cpus_[cpu_index].yield_to_other = thread;
     }
@@ -470,9 +490,24 @@ XThread* GuestScheduler::DequeueReady(int cpu_index) {
   XThread* yielder = cpu.yield_to_other;
   cpu.yield_to_other = nullptr;
 
+  // Prefer the low priority band while a window is open. Unlike the console we
+  // still run the locked-out band rather than idle, so a wrong mask can only
+  // slow a thread down, never strand it.
+  uint32_t summary = cpu.ready_summary;
+  if (cpu.background_until_tick) {
+    if (Clock::host_tick_count_raw() >= cpu.background_until_tick) {
+      cpu.background_until_tick = 0;
+    } else if (uint32_t banded = summary & kBackgroundReadyMask) {
+      // Only a changed top bit means the mask picked a different thread.
+      if (xe::lzcnt(banded) != xe::lzcnt(summary)) {
+        stats_.background_picks.fetch_add(1, std::memory_order_relaxed);
+      }
+      summary = banded;
+    }
+  }
+
   // Highest set bit = highest ready priority.
-  int level =
-      31 - xe::lzcnt(cpu.ready_summary.load(std::memory_order_relaxed));
+  int level = 31 - xe::lzcnt(summary);
   XThread* thread = cpu.ready_head[level];
   if (yielder && thread == yielder) {
     if (XThread* other = HighestReadyExcept(cpu, yielder)) {
@@ -577,6 +612,37 @@ void GuestScheduler::RequeueForPriority(XThread* thread) {
     ClearReadyLevel(cpu, old);
   }
   LinkReadyLocked(cpu, thread, false);
+}
+
+void GuestScheduler::MigrateForAffinity(XThread* thread) {
+  int target = -1;
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    auto& links = thread->scheduler_links();
+    // A running fiber's context is not saved yet, so only its own dispatch
+    // thread may move it. Parked ones re-home when they are made ready.
+    if (!links.queued || links.running || links.cpu < 0) {
+      return;
+    }
+    target = CpuOf(thread);
+    if (target == links.cpu) {
+      return;
+    }
+    Cpu& from = cpus_[links.cpu];
+    int prio = links.queued_prio;
+    UnlinkLocked(from.ready_head[prio], from.ready_tail[prio], thread);
+    if (!from.ready_head[prio]) {
+      from.ready_summary &= ~(uint32_t(1) << prio);
+    }
+    if (from.yield_to_other == thread) {
+      from.yield_to_other = nullptr;
+    }
+    links.cpu = target;
+    LinkReadyLocked(cpus_[target], thread, TakeHeadRequeue(links));
+  }
+  if (cpus_[target].parked.load() && cpus_[target].ready_event) {
+    cpus_[target].ready_event->Set();
+  }
 }
 
 bool GuestScheduler::ForgetThread(XThread* thread) {
@@ -826,13 +892,13 @@ bool GuestScheduler::YieldCurrentThread(bool quantum_end, bool to_lower) {
   if (!quantum_end && NothingElseToRun(self)) {
     return false;  // nothing else ran, which is exactly what we report
   }
-  // A slice cut short by a higher-priority thread is not a quantum end, that
-  // thread re-runs at the head instead.
-  if (quantum_end && !links.preempted) {
+  // Neither a preemption nor a re-poll wake is a quantum end, so both resume at
+  // the head with the rest of the slice and no decay.
+  bool keep_slice = links.preempted || links.repoll_preempt;
+  if (quantum_end && !keep_slice) {
     self->OnQuantumEnd();
   }
-  // Only a preemption keeps the remaining slice, anything else consumed it.
-  if (!links.preempted) {
+  if (!keep_slice) {
     links.quantum_deadline_tick = 0;
   }
   int cpu_index = t_current_cpu;
@@ -1031,9 +1097,10 @@ void GuestScheduler::WakeAll() {
   if (!any_blocked) {
     return;
   }
-  // Ask each CPU with a blocked waiter to re-poll, preempting its runner only
-  // when a waiter outranks it. An equal-priority preempt would head-requeue
-  // the runner past ready threads on every signal and starve them.
+  // Ask each CPU with a blocked waiter to re-poll, bumping its runner only when
+  // a waiter outranks it - an equal-priority bump would head-requeue it past
+  // ready threads on every signal. The waiter may not re-poll ready, so this is
+  // repoll_preempt and not links.preempted.
   {
     std::lock_guard<std::mutex> lock(lock_);
     for (int i = 0; i < kMaxCpus; ++i) {
@@ -1045,7 +1112,7 @@ void GuestScheduler::WakeAll() {
       XThread* running = cpu.current_thread;
       if (running &&
           cpu.max_blocked_prio > ClampPriority(running->priority())) {
-        running->scheduler_links().preempted = true;
+        running->scheduler_links().repoll_preempt = true;
         running->thread_state()->context()->preempt_requested = 1;
       }
     }
@@ -1088,9 +1155,11 @@ void GuestScheduler::WakeForSignal(const XObject* object,
       Cpu& cpu = cpus_[links.cpu];
       cpu.repoll_now.store(true, std::memory_order_relaxed);
       XThread* running = cpu.current_thread;
+      // Speculative: the waiter may not wake, so a re-poll wake rather than
+      // a preemption.
       if (running && ClampPriority(sole_waiter->priority()) >
                          ClampPriority(running->priority())) {
-        running->scheduler_links().preempted = true;
+        running->scheduler_links().repoll_preempt = true;
         running->thread_state()->context()->preempt_requested = 1;
       }
       wake[links.cpu] = true;
@@ -1128,8 +1197,9 @@ void GuestScheduler::WakeForSignal(const XObject* object,
         }
         cpu.repoll_now.store(true, std::memory_order_relaxed);
         XThread* running = cpu.current_thread;
+        // Speculative like WakeAll's, so a re-poll wake rather than a preemption.
         if (running && watcher_prio > ClampPriority(running->priority())) {
-          running->scheduler_links().preempted = true;
+          running->scheduler_links().repoll_preempt = true;
           running->thread_state()->context()->preempt_requested = 1;
         }
         wake[i] = true;
@@ -1220,6 +1290,7 @@ void GuestScheduler::BlockCurrentThread(uint64_t deadline_ms,
     // Park self (running, in no list) on this CPU's blocked list.
     links.blocked = true;
     links.preempted = false;
+    links.repoll_preempt = false;
     links.cpu = cpu_index;
     links.ready_next = nullptr;
     links.wait_gated = gated;
@@ -1345,9 +1416,7 @@ void GuestScheduler::RereadyBlocked(int cpu_index, bool poked) {
       // KeSetAffinityThread may have moved it while blocked.
       int target = CpuOf(t);
       links.cpu = target;
-      bool at_head = links.preempted;
-      links.preempted = false;
-      LinkReadyLocked(cpus_[target], t, at_head);
+      LinkReadyLocked(cpus_[target], t, TakeHeadRequeue(links));
       if (target != cpu_index) {
         wake_mask |= uint32_t(1) << target;
       }
@@ -1425,9 +1494,7 @@ void GuestScheduler::RunLoop(int cpu_index) {
           links.running = false;
           links.queued = true;
           links.cpu = home;
-          bool at_head = links.preempted;
-          links.preempted = false;
-          LinkReadyLocked(cpus_[home], next, at_head);
+          LinkReadyLocked(cpus_[home], next, TakeHeadRequeue(links));
         }
         if (cpus_[home].parked.load() && cpus_[home].ready_event) {
           cpus_[home].ready_event->Set();
@@ -1500,6 +1567,52 @@ void GuestScheduler::RunLoop(int cpu_index) {
          cpu_index, shutting_down_.load());
 }
 
+void GuestScheduler::EnterBackgroundMode() {
+  if (!started_.load() || !background_ticks_) {
+    return;
+  }
+  // The mask names guest CPUs (the console's 6 hardware threads, so higher
+  // bits name none). With fewer dispatch CPUs than guest ones
+  // (guest_scheduler_dispatch_cpus), the window opens on the dispatch CPU each
+  // background guest CPU runs on.
+  uint32_t guest_processors = kernel_state_->GetBackgroundProcessors();
+  uint32_t processors = 0;
+  for (uint32_t guest_cpu = 0; guest_cpu < uint32_t(kMaxCpus); ++guest_cpu) {
+    if (guest_processors & (uint32_t(1) << guest_cpu)) {
+      processors |= uint32_t(1) << DispatchCpuOf(uint8_t(guest_cpu));
+    }
+  }
+  uint64_t now = Clock::host_tick_count_raw();
+  bool opened = false;
+  std::lock_guard<std::mutex> lock(lock_);
+  for (int i = 0; i < kMaxCpus; ++i) {
+    if (!(processors & (uint32_t(1) << i))) {
+      continue;
+    }
+    Cpu& cpu = cpus_[i];
+    if (now < cpu.background_next_tick) {
+      continue;
+    }
+    cpu.background_until_tick = now + background_ticks_;
+    cpu.background_next_tick = now + background_period_ticks_;
+    opened = true;
+    // Bump a runner the window locks out so the band change lands now rather
+    // than at its next slice end. Not a slice it ran out, so no decay.
+    XThread* running = cpu.current_thread;
+    if (!running || !(cpu.ready_summary & kBackgroundReadyMask)) {
+      continue;
+    }
+    uint32_t running_bit = uint32_t(1) << ClampPriority(running->priority());
+    if (!(running_bit & kBackgroundReadyMask)) {
+      running->scheduler_links().repoll_preempt = true;
+      running->thread_state()->context()->preempt_requested = 1;
+    }
+  }
+  if (opened) {
+    stats_.background_windows.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
 void GuestScheduler::NoteForcedPreempt() {
   stats_.forced_preempts.fetch_add(1, std::memory_order_relaxed);
 }
@@ -1522,6 +1635,8 @@ void GuestScheduler::ReportStatsIfDue() {
   uint64_t idle_wakes = take(stats_.idle_wakes);
   uint64_t switches = take(stats_.switches);
   uint64_t forced = take(stats_.forced_preempts);
+  uint64_t bg_windows = take(stats_.background_windows);
+  uint64_t bg_picks = take(stats_.background_picks);
   uint64_t io_calls = take(stats_.io_calls);
   uint64_t io_queue = take(stats_.io_queue_ns);
   uint64_t io_run = take(stats_.io_run_ns);
@@ -1532,11 +1647,10 @@ void GuestScheduler::ReportStatsIfDue() {
   };
   XELOGI(
       "GuestScheduler: repolls {}/s (rereadied {}, backstop rescues {}), idle "
-      "wakes {}, switches "
-      "{}, forced preempts {} | io {} calls, queued avg {} us max {} us, ran "
-      "avg {} us",
+      "wakes {}, switches {}, forced preempts {}, background {} windows {} "
+      "picks | io {} calls, queued avg {} us max {} us, ran avg {} us",
       repolls, rereadied, backstop_rescues, idle_wakes, switches, forced,
-      io_calls,
+      bg_windows, bg_picks, io_calls,
       io_calls ? to_us(io_queue / io_calls) : 0, to_us(io_queue_max),
       io_calls ? to_us(io_run / io_calls) : 0);
 }

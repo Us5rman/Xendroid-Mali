@@ -1,7 +1,7 @@
 title_name = "Gears Of War"
 title_id = "4D5307D5" # MS-2005
 hash = "1B591620508434A2" # default.xex
-#media_id = "76E9DF5B" # Disc (USA, Europe): http://redump.org/disc/7745
+#media_id = "76E9DF5B" # Disc (USA, Europe): https://redump.info/disc/7745
 
 [[patch]]
     name = "60 FPS"
@@ -25,49 +25,6 @@ hash = "1B591620508434A2" # default.xex
     [[patch.be8]]
         address = 0x82bb6b53 # GTilingMode = 4
         value = 0x04
-
-[[patch]]
-    name = "Flickering Decals Fix"
-    desc = "Fixes decals (bloodpools, bullet holes, etc.) that flicker when using the Vulkan FBO or D3D12 RTV render paths."
-    author = "boma"
-    is_enabled = false
-
-    [[patch.be32]]
-        address = 0x82596a40 # replace DepthBias lfs, BSP receivers
-        value = 0x4bcf0984 # b 0x822873c4 code cave
-    [[patch.be32]]
-        address = 0x822873c4
-        value = 0x3c00bc23
-    [[patch.be32]]
-        address = 0x822873c8
-        value = 0x6000d70a # 0xbc23d70a = -0.01f
-    [[patch.be32]]
-        address = 0x822873cc
-        value = 0x90010180
-    [[patch.be32]]
-        address = 0x822873d0 # Clamp DepthBias
-        value = 0xc0010180 # lfs f0, 0x180(r1)
-    [[patch.be32]]
-        address = 0x822873d4
-        value = 0x4830f670 # b 0x82596a44
-    [[patch.be32]]
-        address = 0x825c6688 # replace DepthBias lfs, static mesh receivers
-        value = 0x4bcc0ba4 # b 0x8228722c code cave
-    [[patch.be32]]
-        address = 0x8228722c
-        value = 0x3c00bc23
-    [[patch.be32]]
-        address = 0x82287230
-        value = 0x6000d70a # 0xbc23d70a = -0.01f
-    [[patch.be32]]
-        address = 0x82287234
-        value = 0x90010178
-    [[patch.be32]]
-        address = 0x82287238 # Clamp DepthBias
-        value = 0xc0010178 # lfs f0, 0x178(r1)
-    [[patch.be32]]
-        address = 0x8228723c
-        value = 0x4833f450 # b 0x825c668c
 
 [[patch]]
     name = "Texture Streaming Fix"

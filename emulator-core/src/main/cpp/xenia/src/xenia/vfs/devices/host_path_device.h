@@ -10,12 +10,18 @@
 #ifndef XENIA_VFS_DEVICES_HOST_PATH_DEVICE_H_
 #define XENIA_VFS_DEVICES_HOST_PATH_DEVICE_H_
 
+#include <filesystem>
 #include <string>
+#include <vector>
 
 #include "xenia/vfs/device.h"
 
 namespace xe {
 namespace vfs {
+
+// Xenia keeps a package thumbnail as a file inside the package directory.
+// The console holds it in the STFS header, so the guest never sees it.
+inline constexpr char kPackageThumbnailFileName[] = "__thumbnail.png";
 
 class HostPathEntry;
 
@@ -47,6 +53,10 @@ class HostPathDevice : public Device {
 
  private:
   void PopulateEntry(HostPathEntry* parent_entry);
+  // Walks one directory, with the canonical path of every directory already
+  // on this branch, so a symlink into one of them is not followed again.
+  void PopulateEntry(HostPathEntry* parent_entry,
+                     std::vector<std::filesystem::path>& ancestors);
 
   std::string name_;
   std::filesystem::path host_path_;

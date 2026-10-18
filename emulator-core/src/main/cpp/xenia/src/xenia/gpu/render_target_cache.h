@@ -749,12 +749,11 @@ class RenderTargetCache {
   // EDRAM memory are committed with a memory barrier.
   void PixelShaderInterlockFullEdramBarrierPlaced();
 
-  // Whether a 7e3 -> 8_8_8_8 in-place reuse should decode (HDR float to LDR
-  // unorm) instead of bit-reinterpreting. Bit-reinterpret is hardware-accurate,
-  // so decode applies only where the reinterpreted bytes are actually seen: a
-  // matched same-base/pitch/MSAA reuse, 7e3 -> plain 8_8_8_8, whose draw blends
-  // over the dest. Everything else (overwrite, reverse, gamma, cvar off) stays
-  // bit-exact.
+  // Whether a 7e3 to 8_8_8_8 in-place reuse should decode (HDR float to LDR
+  // unorm) rather than bit-reinterpret. Reinterpreting is hardware-accurate, so
+  // decoding applies only where those bytes are actually seen, a matched
+  // same-base/pitch/MSAA reuse into a render target of the last update whose
+  // blending reads the destination. Everything else stays bit-exact.
   bool IsTransferValueConverted7e3And8888(RenderTargetKey source,
                                           RenderTargetKey dest) const;
 
@@ -925,6 +924,11 @@ class RenderTargetCache {
   // Only valid for non-pixel-shader-interlock paths.
   RenderTarget*
       last_update_used_render_targets_[1 + xenos::kMaxColorRenderTargets];
+  // Keys of the color render targets of the last successful update whose
+  // blending reads the destination, empty for the other slots. Cleared for
+  // transfers gathered outside a draw, like before a resolve clear.
+  RenderTargetKey
+      last_update_blend_reading_color_rts_[xenos::kMaxColorRenderTargets];
   // Render targets used by the draw call with the last successful update or
   // previous updates, unless a different or a totally new one was bound (or
   // surface info was changed), to avoid unneeded render target switching (which

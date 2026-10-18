@@ -1,13 +1,21 @@
-# Added presentation engines and licensing
+# Licensing
 
-Original XenDroid/Xenia components retain their original licenses. The combined
-build now links a GPL-3.0-or-later LSFG engine; distribution of that combined
-binary must provide corresponding source under the applicable GPL terms as well
-as the original notices. This does not relicense unrelated upstream BSD/MIT files.
+Xendroid+'s own code is Copyright (C) 2026 phforner0 and the Xendroid+
+contributors, licensed under the GNU Affero General Public License, version 3 or
+(at your option) any later version: `LICENSE` at the repository root.
+
+Original XenDroid/Xenia components and the third-party components below retain
+their original licenses. The combined build links a GPL-3.0-or-later LSFG engine
+(section 13 of both licenses allows combining it with AGPL-3.0 code); distribution
+of that combined binary must provide corresponding source under the applicable
+AGPL/GPL terms as well as the original notices. This does not relicense unrelated
+upstream BSD/MIT files.
 
 | Component | Pinned source | License and local notice |
 |---|---|---|
+| Xendroid+ (this project's own code) | This repository | `LICENSE` at the repository root (AGPL-3.0-or-later) |
 | Xenia | Existing source tree | `emulator-core/src/main/cpp/xenia/LICENSE` (BSD) |
+| Mbed TLS (kernel crypto and XEX decryption) | Mbed-TLS/mbedtls `068ff080b369adfac81509f9b57b2afabaf82dc5` (3.6.7; only the crypto sources the build uses) | `xenia/third_party/mbedtls/LICENSE` (Apache-2.0 OR GPL-2.0-or-later) |
 | Win-FG | The412Banner/win-fg `fbc69ed6c5bf16b824d0a29bd8b171675101f9dd` | `third_party/winfg/LICENSE` (MIT), FidelityFX notice and THIRD-PARTY.md |
 | LSFG host chain | The412Banner/Bannerlator `15d4f73c079824d54c468f079361ce56d88a7c2e` | `third_party/lsfg/LICENSE` and original GPL-3.0-or-later SPDX headers; Eden/WinNative/lsfg-vk credits preserved |
 | DXBC translator subset | Same Bannerlator revision, derived from DXVK | `third_party/lsfg-dxbc/LICENSE.md` (zlib-style license) |

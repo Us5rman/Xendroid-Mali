@@ -9,6 +9,12 @@
 
 #include "xenia/cpu/xex_module.h"
 
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstring>
+#include <unordered_set>
+
 #include "third_party/fmt/include/fmt/format.h"
 
 #include "xenia/base/byte_order.h"
@@ -28,9 +34,8 @@
 #include "xenia/kernel/util/xex2_util.h"
 #include "xenia/kernel/xmodule.h"
 
-#include "third_party/crypto/TinySHA1.hpp"
-#include "third_party/crypto/rijndael-alg-fst.c"
-#include "third_party/crypto/rijndael-alg-fst.h"
+#include "third_party/mbedtls/include/mbedtls/aes.h"
+#include "third_party/mbedtls/include/mbedtls/sha1.h"
 #include "xenia/cpu/ppc/ppc_decode_data.h"
 #include "xenia/cpu/ppc/ppc_instr.h"
 DEFINE_bool(disable_instruction_infocache, false,
@@ -65,21 +70,14 @@ static constexpr uint8_t xe_xex2_devkit_key[16] = {
 void aes_decrypt_buffer(const uint8_t* session_key, const uint8_t* input_buffer,
                         const size_t input_size, uint8_t* output_buffer,
                         const size_t output_size) {
-  uint32_t rk[4 * (MAXNR + 1)];
+  mbedtls_aes_context context;
+  mbedtls_aes_init(&context);
+  mbedtls_aes_setkey_dec(&context, session_key, 128);
   uint8_t ivec[16] = {0};
-  int32_t Nr = rijndaelKeySetupDec(rk, session_key, 128);
-  const uint8_t* ct = input_buffer;
-  uint8_t* pt = output_buffer;
-  for (size_t n = 0; n < input_size; n += 16, ct += 16, pt += 16) {
-    // Decrypt 16 uint8_ts from input -> output.
-    rijndaelDecrypt(rk, Nr, ct, pt);
-    for (size_t i = 0; i < 16; i++) {
-      // XOR with previous.
-      pt[i] ^= ivec[i];
-      // Set previous.
-      ivec[i] = ct[i];
-    }
-  }
+  mbedtls_aes_crypt_cbc(&context, MBEDTLS_AES_DECRYPT,
+                        std::min(input_size, output_size) & ~size_t(15), ivec,
+                        input_buffer, output_buffer);
+  mbedtls_aes_free(&context);
 }
 
 namespace xe {
@@ -254,9 +252,11 @@ int XexModule::ApplyPatch(XexModule* module) {
   // If headers_source_offset is set, copy [source_offset:source_size] to
   // target_offset
   if (patch_header->delta_headers_source_offset) {
-    memcpy(header_ptr + patch_header->delta_headers_target_offset,
-           header_ptr + patch_header->delta_headers_source_offset,
-           patch_header->delta_headers_source_size);
+    // Same buffer at both ends, so the ranges can overlap - see the note in
+    // lzxdelta_apply_patch.
+    memmove(header_ptr + patch_header->delta_headers_target_offset,
+            header_ptr + patch_header->delta_headers_source_offset,
+            patch_header->delta_headers_source_size);
   }
 
   // If new size is smaller than original, null out the difference
@@ -287,30 +287,32 @@ int XexModule::ApplyPatch(XexModule* module) {
   // Update security info context with latest security info data
   module->ReadSecurityInfo();
 
+  // image_size() uses the heap at base_address_, so move the base first.
+  xe::be<uint32_t>* base_addr_opt = nullptr;
+  if (module->GetOptHeader(XEX_HEADER_IMAGE_BASE_ADDRESS, &base_addr_opt)) {
+    module->base_address_ = *base_addr_opt;
+  }
+  const uint32_t new_base_address = module->base_address_;
+  const bool base_moved = new_base_address != original_base_address;
+
   uint32_t new_image_size = module->image_size();
 
   // Check if we need to alloc new memory for the patched xex
-  if (new_image_size > original_image_size) {
-    uint32_t size_delta = new_image_size - original_image_size;
-    uint32_t addr_new_mem = module->base_address_ + original_image_size;
-
-    // Before we allocate new range we must check if patch haven't modified
-    // base_address.
-    uint32_t new_base_address = module->base_address();
-    xe::be<uint32_t>* base_addr_opt = nullptr;
-    if (module->GetOptHeader(XEX_HEADER_IMAGE_BASE_ADDRESS, &base_addr_opt)) {
-      new_base_address = *base_addr_opt;
-    }
-
-    if (original_base_address != new_base_address) {
+  if (base_moved || new_image_size > original_image_size) {
+    uint32_t addr_new_mem;
+    uint32_t size_delta;
+    if (base_moved) {
       XELOGW(
           "Patch for module: {} changed base_address from {:08X} to {:08X}, "
           "need to reallocate xex "
           "data!",
-          module->name(), module->base_address_, new_base_address);
-      module->base_address_ = new_base_address;
+          module->name(), original_base_address, new_base_address);
       addr_new_mem = new_base_address;
-      size_delta = new_image_size;
+      // Room for the old image, trimmed below if the patched one is smaller.
+      size_delta = std::max(original_image_size, new_image_size);
+    } else {
+      addr_new_mem = new_base_address + original_image_size;
+      size_delta = new_image_size - original_image_size;
     }
 
     bool alloc_result =
@@ -328,11 +330,13 @@ int XexModule::ApplyPatch(XexModule* module) {
       return 6;
     }
 
-    // For base_address change we need to copy data from previous allocation to
-    // new one
-    if (original_base_address != new_base_address) {
+    // Move the image to its new base and free the old allocation.
+    if (base_moved) {
       kernel_state_->memory()->Copy(new_base_address, original_base_address,
                                     original_image_size);
+      memory()
+          ->LookupHeap(original_base_address)
+          ->Release(original_base_address);
     }
   }
 
@@ -395,9 +399,11 @@ int XexModule::ApplyPatch(XexModule* module) {
   // If image_source_offset is set, copy [source_offset:source_size] to
   // target_offset
   if (patch_header->delta_image_source_offset) {
-    memcpy(base_exe + patch_header->delta_image_target_offset,
-           base_exe + patch_header->delta_image_source_offset,
-           patch_header->delta_image_source_size);
+    // Same buffer at both ends, so the ranges can overlap - see the note in
+    // lzxdelta_apply_patch.
+    memmove(base_exe + patch_header->delta_image_target_offset,
+            base_exe + patch_header->delta_image_source_offset,
+            patch_header->delta_image_source_size);
   }
 
   // TODO: should we use new_image_size here instead?
@@ -411,15 +417,12 @@ int XexModule::ApplyPatch(XexModule* module) {
   }
 
   uint8_t digest[0x14];
-  sha1::SHA1 s;
   // Now loop through each block and apply the delta patches inside
   while (cur_block->block_size) {
     const auto* next_block = (const xex2_compressed_block_info*)p;
 
     // Compare block hash, if no match we probably used wrong decrypt key
-    s.reset();
-    s.processBytes(p, cur_block->block_size);
-    s.finalize(digest);
+    mbedtls_sha1(p, cur_block->block_size, digest);
 
     if (memcmp(digest, cur_block->block_hash, 0x14) != 0) {
       result_code = 9;
@@ -588,6 +591,17 @@ int XexModule::ReadImageBasicCompressed(const void* xex_addr,
   uint32_t uncompressed_size = 0;
 
   auto* file_info = opt_file_format_info();
+  // The block list comes from the file and must lie inside the header that was
+  // read, or both loops below read past it.
+  const uintptr_t header_begin = uintptr_t(xex_header_mem_.data());
+  const uintptr_t header_end = header_begin + xex_header_mem_.size();
+  const uintptr_t info_begin = uintptr_t(file_info);
+  if (!file_info || info_begin < header_begin || info_begin > header_end ||
+      header_end - info_begin < 8 || file_info->info_size < 8 ||
+      file_info->info_size > header_end - info_begin) {
+    XELOGE("XEX: the basic compression block list is outside the header");
+    return 1;
+  }
   auto& comp_info = file_info->compression_info.basic;
 
   uint32_t block_count = (file_info->info_size - 8) / 8;
@@ -622,13 +636,30 @@ int XexModule::ReadImageBasicCompressed(const void* xex_addr,
   std::memset(buffer, 0, total_size);  // Quickly zero the contents.
   uint8_t* d = buffer;
 
-  uint32_t rk[4 * (MAXNR + 1)];
+  mbedtls_aes_context context;
+  mbedtls_aes_init(&context);
+  mbedtls_aes_setkey_dec(&context, session_key_, 128);
   uint8_t ivec[16] = {0};
-  int32_t Nr = rijndaelKeySetupDec(rk, session_key_, 128);
 
   for (size_t n = 0; n < block_count; n++) {
     const uint32_t data_size = comp_info.blocks[n].data_size;
     const uint32_t zero_size = comp_info.blocks[n].zero_size;
+
+    // A block must fit what was allocated and what is left of the file, or a
+    // crafted header reads and writes past them - the library scan loads the
+    // XEX of every game it lists. A block of zeros only writes nothing.
+    const size_t written = size_t(d - buffer);
+    const size_t consumed = size_t(p - source_buffer);
+    if (consumed > exe_length || data_size > exe_length - consumed ||
+        (data_size &&
+         (written > total_size || data_size > total_size - written))) {
+      XELOGE(
+          "XEX: basic compression block {} does not fit: {} bytes at {} of a "
+          "{}-byte image, {} of a {}-byte file",
+          n, data_size, written, total_size, consumed, exe_length);
+      mbedtls_aes_free(&context);
+      return 1;
+    }
 
     switch (opt_file_format_info()->encryption_type) {
       case XEX_ENCRYPTION_NONE:
@@ -638,20 +669,10 @@ int XexModule::ReadImageBasicCompressed(const void* xex_addr,
         }
         memcpy(d, p, data_size);
         break;
-      case XEX_ENCRYPTION_NORMAL: {
-        const uint8_t* ct = p;
-        uint8_t* pt = d;
-        for (size_t m = 0; m < data_size; m += 16, ct += 16, pt += 16) {
-          // Decrypt 16 uint8_ts from input -> output.
-          rijndaelDecrypt(rk, Nr, ct, pt);
-          for (size_t i = 0; i < 16; i++) {
-            // XOR with previous.
-            pt[i] ^= ivec[i];
-            // Set previous.
-            ivec[i] = ct[i];
-          }
-        }
-      } break;
+      case XEX_ENCRYPTION_NORMAL:
+        mbedtls_aes_crypt_cbc(&context, MBEDTLS_AES_DECRYPT, data_size & ~15u,
+                              ivec, p, d);
+        break;
       default:
         assert_always();
         return 1;
@@ -661,6 +682,7 @@ int XexModule::ReadImageBasicCompressed(const void* xex_addr,
     d += data_size + zero_size;
   }
 
+  mbedtls_aes_free(&context);
   return 0;
 }
 
@@ -681,7 +703,6 @@ int XexModule::ReadImageCompressed(const void* xex_addr, size_t xex_length) {
   uint8_t* compress_buffer = NULL;
   const uint8_t* p = NULL;
   uint8_t* d = NULL;
-  sha1::SHA1 s;
 
   // Decrypt (if needed).
   bool free_input = false;
@@ -722,9 +743,7 @@ int XexModule::ReadImageCompressed(const void* xex_addr, size_t xex_length) {
     const auto* next_block = (const xex2_compressed_block_info*)p;
 
     // Compare block hash, if no match we probably used wrong decrypt key
-    s.reset();
-    s.processBytes(p, cur_block->block_size);
-    s.finalize(block_calced_digest);
+    mbedtls_sha1(p, cur_block->block_size, block_calced_digest);
     if (memcmp(block_calced_digest, cur_block->block_hash, 0x14) != 0) {
       result_code = 2;
       break;
@@ -1090,15 +1109,10 @@ bool XexModule::LoadContinue() {
 }
 
 void XexModule::Precompile() {
-  sha1::SHA1 final_image_sha_;
-
-  final_image_sha_.reset();
-
   unsigned high_code = this->high_address_ - this->low_address_;
 
-  final_image_sha_.processBytes(memory()->TranslateVirtual(this->low_address_),
-                                high_code);
-  final_image_sha_.finalize(image_sha_bytes_);
+  mbedtls_sha1(memory()->TranslateVirtual(this->low_address_), high_code,
+               image_sha_bytes_);
 
   image_sha_str_.clear();
   for (unsigned i = 0; i < sizeof(image_sha_bytes_); ++i) {
@@ -1442,6 +1456,159 @@ static uint32_t GetBLCalledFunction(XexModule* xexmod, uint32_t current_base,
 }
 static bool IsOpcodeBL(unsigned w) {
   return (w >> (32 - 6)) == 18 && ppc::PPCOpcodeBits{w}.I.LK;
+}
+
+constexpr uint32_t kScanDepth = 3;
+constexpr uint32_t kMaxScannedFunctions = 128;
+constexpr uint32_t kMaxScannedInstructions = 2048;
+constexpr uint32_t kMaxTableBytes = 0x40000;
+
+std::vector<uint32_t> XexModule::FindStaticInitializers() const {
+  std::vector<uint32_t> initializers;
+  uint32_t entry_point = 0;
+  if (!GetOptHeader(XEX_HEADER_ENTRY_POINT, &entry_point) ||
+      !IsCodeAddress(entry_point)) {
+    return initializers;
+  }
+
+  auto read = [this](uint32_t address) -> uint32_t {
+    return *memory()->TranslateVirtualBE<uint32_t>(address);
+  };
+  // A table holds code addresses and 0 or -1 padding between NULL sentinels.
+  auto add_tables = [&](std::vector<uint32_t>& constants) {
+    std::sort(constants.begin(), constants.end());
+    constants.erase(std::unique(constants.begin(), constants.end()),
+                    constants.end());
+    for (auto begin_it = constants.begin(); begin_it != constants.end();
+         ++begin_it) {
+      uint32_t begin = *begin_it;
+      const PESection* section = nullptr;
+      for (auto& candidate : pe_sections_) {
+        if (!(candidate.flags & kXEPESectionContainsCode) &&
+            begin >= candidate.address &&
+            begin - candidate.address < candidate.raw_size) {
+          section = &candidate;
+          break;
+        }
+      }
+      if (!section || (begin & 3) || read(begin)) {
+        continue;
+      }
+      uint32_t section_end =
+          section->address + std::min(section->size, section->raw_size);
+      uint32_t limit = std::min(section_end - 4, begin + kMaxTableBytes);
+      uint32_t valid_end = begin;
+      while (valid_end < limit) {
+        uint32_t value = read(valid_end);
+        if (value && value != UINT32_MAX && !IsCodeAddress(value)) {
+          break;
+        }
+        valid_end += 4;
+      }
+      uint32_t table_end = begin;
+      for (auto end_it = begin_it + 1;
+           end_it != constants.end() && *end_it <= valid_end; ++end_it) {
+        if (!(*end_it & 3) && !read(*end_it)) {
+          table_end = *end_it;
+        }
+      }
+      for (uint32_t address = begin; address < table_end; address += 4) {
+        uint32_t value = read(address);
+        if (value && value != UINT32_MAX) {
+          initializers.push_back(value);
+        }
+      }
+    }
+  };
+
+  // _cinit hands _initterm its [begin, end) bounds as lis/addi constants.
+  std::vector<uint32_t> functions = {entry_point};
+  std::unordered_set<uint32_t> queued = {entry_point};
+  for (uint32_t depth = 0; depth < kScanDepth; ++depth) {
+    std::vector<uint32_t> next_depth;
+    for (uint32_t function : functions) {
+      std::array<uint32_t, 32> registers = {};
+      std::vector<uint32_t> constants;
+      for (uint32_t i = 0, address = function;
+           i < kMaxScannedInstructions && address < high_address_;
+           ++i, address += 4) {
+        uint32_t code = read(address);
+        ppc::PPCOpcodeBits bits{code};
+        uint32_t opcode = code >> 26;
+        if (code == 0x4E800020) {
+          break;
+        } else if (IsOpcodeBL(code)) {
+          uint32_t callee = GetBLCalledFunction(nullptr, address, bits);
+          if (depth + 1 < kScanDepth && IsCodeAddress(callee) &&
+              next_depth.size() < kMaxScannedFunctions &&
+              queued.insert(callee).second) {
+            next_depth.push_back(callee);
+          }
+        } else if (opcode == 15 && !bits.D.RA) {
+          registers[bits.D.RT] = static_cast<uint32_t>(bits.D.DS) << 16;
+        } else if (opcode == 14 && bits.D.RA) {
+          registers[bits.D.RT] =
+              registers[bits.D.RA] +
+              static_cast<uint32_t>(ppc::XEEXTS16(bits.D.DS));
+          constants.push_back(registers[bits.D.RT]);
+        } else if (opcode == 24) {
+          registers[bits.D.RA] = registers[bits.D.RT] | bits.D.DS;
+          constants.push_back(registers[bits.D.RA]);
+        }
+      }
+      add_tables(constants);
+    }
+    functions.swap(next_depth);
+  }
+
+  std::sort(initializers.begin(), initializers.end());
+  initializers.erase(std::unique(initializers.begin(), initializers.end()),
+                     initializers.end());
+  return initializers;
+}
+
+void XexModule::PrecompileStaticInitializers() {
+  auto start_time = std::chrono::steady_clock::now();
+  std::vector<uint32_t> pending = FindStaticInitializers();
+  if (pending.empty()) {
+    return;
+  }
+  size_t initializer_count = pending.size();
+
+  // Lazy compiles during static init can reorder the threads it starts.
+  std::unordered_set<uint32_t> visited(pending.begin(), pending.end());
+  size_t compiled = 0;
+  while (!pending.empty()) {
+    uint32_t address = pending.back();
+    pending.pop_back();
+    auto function = processor_->ResolveFunction(address);
+    if (!function || !function->has_end_address()) {
+      continue;
+    }
+    ++compiled;
+    // The scanner's end address is the last instruction, not one past it.
+    uint32_t start = function->address();
+    uint32_t last = function->end_address();
+    for (uint32_t instr = start; instr <= last; instr += 4) {
+      uint32_t code = *memory()->TranslateVirtualBE<uint32_t>(instr);
+      if ((code >> 26) != 18) {
+        continue;
+      }
+      uint32_t target =
+          GetBLCalledFunction(this, instr, ppc::PPCOpcodeBits{code});
+      bool is_tail_call = target < start || target > last;
+      if ((IsOpcodeBL(code) || is_tail_call) && IsCodeAddress(target) &&
+          visited.insert(target).second) {
+        pending.push_back(target);
+      }
+    }
+  }
+
+  auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - start_time);
+  XELOGI(
+      "Precompiled {} static initializers and callees ({} functions) in {} ms",
+      initializer_count, compiled, elapsed.count());
 }
 
 std::vector<uint32_t> XexModule::PreanalyzeCode() {

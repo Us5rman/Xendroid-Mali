@@ -174,6 +174,7 @@ std::vector<uint8_t> UserProfile::LoadGpd(const uint32_t title_id) {
         "User {} (XUID: {:016X}) cannot read profile GPD! Status: {:08X} read: "
         "{}/{} bytes",
         name(), xuid(), result, read_size, entry->size());
+    file->Destroy();
     return {};
   }
 

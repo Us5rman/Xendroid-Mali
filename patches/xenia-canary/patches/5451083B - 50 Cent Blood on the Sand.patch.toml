@@ -1,7 +1,7 @@
 title_name = "50 Cent: Blood on the Sand" # BoTS
 title_id = "5451083B" # TQ-2107
 hash = "355BF86D7238F120" # default.xex
-#media_id = "6FF4F789" # Disc (USA, Europe): http://redump.org/disc/14040
+#media_id = "6FF4F789" # Disc (USA, Europe): https://redump.info/disc/14040
 
 [[patch]]
     name = "Dynamic Lighting & Shadows Shading Fix"
@@ -12,31 +12,6 @@ hash = "355BF86D7238F120" # default.xex
     [[patch.be8]]
         address = 0x83777f4f # GTilingMode = 4
         value = 0x04
-
-[[patch]]
-    name = "Flickering Decals Fix"
-    desc = "Fixes decals (bloodpools, bullet holes, etc.) that flicker when using the Vulkan FBO or D3D12 RTV render paths."
-    author = "boma"
-    is_enabled = false
-
-    [[patch.be32]]
-        address = 0x82c2987c
-        value = 0x4b9142c8
-    [[patch.be32]]
-        address = 0x8253db44
-        value = 0x3c00bc23
-    [[patch.be32]]
-        address = 0x8253db48
-        value = 0x6000d70a
-    [[patch.be32]]
-        address = 0x8253db4c
-        value = 0x90010160
-    [[patch.be32]]
-        address = 0x8253db50
-        value = 0xc0010160
-    [[patch.be32]]
-        address = 0x8253db54
-        value = 0x486ebd2c
 
 [[patch]]
     name = "Upscaling Fix - Disable Gaussian Blur (sharper, less bloom/DoF)"

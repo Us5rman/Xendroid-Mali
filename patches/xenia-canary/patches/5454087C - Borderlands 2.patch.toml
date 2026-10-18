@@ -1,7 +1,7 @@
 title_name = "Borderlands 2"
 title_id = "5454087C" # TT-2172
 hash = "7902273991112C47" # default.xex
-#media_id = "00A8D174" # Disc (World): http://redump.org/disc/43227
+#media_id = "00A8D174" # Disc (World): https://redump.info/disc/43227
 
 [[patch]]
     name = "Unlock FPS"
@@ -15,6 +15,19 @@ hash = "7902273991112C47" # default.xex
     [[patch.be8]]
         address = 0x82e642e7
         value = 0x01 # 0x00=unlimited; 0x01=60FPS; 0x02=30FPS
+
+[[patch]]
+    name = "Occlusion Query Fix"
+    desc = "Force occlusion testing against full-resolution depth, reducing geometry popping that sometimes occurs when using strict occlusion queries."
+    author = "boma"
+    is_enabled = false
+
+    [[patch.be32]]
+        address = 0x828ebfdc
+        value = 0x39600000
+    [[patch.be32]]
+        address = 0x82919180
+        value = 0x39600000
 
 [[patch]]
     name = "16x Anisotropic Filtering"

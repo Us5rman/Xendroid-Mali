@@ -1,7 +1,7 @@
 title_name = "Gears Of War" # TU5
 title_id = "4D5307D5" # MS-2005
 hash = "34849A59634915F6" # default.xex
-#media_id = "76E9DF5B" # Disc (USA, Europe): http://redump.org/disc/7745
+#media_id = "76E9DF5B" # Disc (USA, Europe): https://redump.info/disc/7745
 
 [[patch]]
     name = "60 FPS"
@@ -31,49 +31,6 @@ hash = "34849A59634915F6" # default.xex
     [[patch.be8]]
         address = 0x82f97733 # GTilingMode = 4
         value = 0x04
-
-[[patch]]
-    name = "Flickering Decals Fix"
-    desc = "Fixes decals (bloodpools, bullet holes, etc.) that flicker when using the Vulkan FBO or D3D12 RTV render paths."
-    author = "boma"
-    is_enabled = false
-
-    [[patch.be32]]
-        address = 0x825acf60
-        value = 0x4bcec03c
-    [[patch.be32]]
-        address = 0x82298f9c
-        value = 0x3c00bc23
-    [[patch.be32]]
-        address = 0x82298fa0
-        value = 0x6000d70a
-    [[patch.be32]]
-        address = 0x82298fa4
-        value = 0x90010180
-    [[patch.be32]]
-        address = 0x82298fa8
-        value = 0xc0010180
-    [[patch.be32]]
-        address = 0x82298fac
-        value = 0x48313fb8
-    [[patch.be32]]
-        address = 0x829a84d0
-        value = 0x4b8f0934
-    [[patch.be32]]
-        address = 0x82298e04
-        value = 0x3c00bc23
-    [[patch.be32]]
-        address = 0x82298e08
-        value = 0x6000d70a
-    [[patch.be32]]
-        address = 0x82298e0c
-        value = 0x90010178
-    [[patch.be32]]
-        address = 0x82298e10
-        value = 0xc0010178
-    [[patch.be32]]
-        address = 0x82298e14
-        value = 0x4870f6c0
 
 [[patch]]
     name = "Disable Motion Blur"

@@ -19,6 +19,7 @@
 #include "xenia/kernel/xfile.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/vfs/devices/host_path_device.h"
+#include "xenia/vfs/devices/xcontent_container_device.h"
 
 DECLARE_int32(license_mask);
 
@@ -26,7 +27,6 @@ namespace xe {
 namespace kernel {
 namespace xam {
 
-static const char* kThumbnailFileName = "__thumbnail.png";
 static const char* kGameContentHeaderDirName = "Headers";
 static const char* kSpaFilename = "spa.bin";
 
@@ -43,10 +43,24 @@ ContentPackage::ContentPackage(KernelState* kernel_state,
   content_data_ = data;
 
   auto fs = kernel_state_->file_system();
-  auto device =
-      std::make_unique<vfs::HostPathDevice>(device_path_, package_path, false);
-  device->Initialize();
-  fs->RegisterDevice(std::move(device));
+  if (std::filesystem::is_directory(package_path)) {
+    auto device = std::make_unique<vfs::HostPathDevice>(device_path_,
+                                                        package_path, false);
+    mounted_ = device->Initialize();
+    fs->RegisterDevice(std::move(device));
+  } else {
+    // A title can install content by copying the package file itself, so a
+    // package is either an extracted directory or a container.
+    auto device = vfs::XContentContainerDevice::CreateContentDevice(
+        device_path_, package_path);
+    if (device && device->Initialize()) {
+      license_ = device->license_mask();
+      mounted_ = true;
+      fs->RegisterDevice(std::move(device));
+    } else {
+      XELOGE("{}: Cannot mount content container {}", __func__, package_path);
+    }
+  }
   fs->RegisterSymbolicLink(root_name_ + ":", device_path_);
 }
 
@@ -96,6 +110,19 @@ std::filesystem::path ContentManager::ResolvePackageRoot(
   return root_path_ / xuid_str / title_id_str / content_type_str;
 }
 
+// FATX is case-insensitive, so on a case-sensitive host filesystem (Linux)
+// fall back to a package directory that differs only in case.
+static std::filesystem::path ResolveNameInsensitive(
+    const std::filesystem::path& parent, const std::string_view name) {
+  std::error_code ec;
+  for (const auto& child : std::filesystem::directory_iterator(parent, ec)) {
+    if (xe::utf8::equal_case(xe::path_to_utf8(child.path().filename()), name)) {
+      return child.path();
+    }
+  }
+  return {};
+}
+
 std::filesystem::path ContentManager::ResolvePackagePath(
     const uint64_t xuid, const XCONTENT_AGGREGATE_DATA& data,
     const uint32_t disc_number) {
@@ -115,6 +142,13 @@ std::filesystem::path ContentManager::ResolvePackagePath(
         ResolvePackageRoot(used_xuid, title_id, data.content_type);
     std::string final_name = xe::string_util::trim(data.file_name());
     std::filesystem::path package_path = package_root / xe::to_path(final_name);
+
+    if (!std::filesystem::exists(package_path)) {
+      auto existing = ResolveNameInsensitive(package_root, final_name);
+      if (!existing.empty()) {
+        package_path = existing;
+      }
+    }
 
     if (disc_number != -1) {
       package_path /= fmt::format("disc{:03}", disc_number);
@@ -216,25 +250,39 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(
     auto file_infos = xe::filesystem::ListFiles(package_root);
 
     for (const auto& file_info : file_infos) {
-      if (file_info.type != xe::filesystem::FileInfo::Type::kDirectory) {
-        // Directories only.
-        continue;
-      }
-
       XCONTENT_AGGREGATE_DATA content_data;
       if (XSUCCEEDED(ReadContentHeaderFile(xe::path_to_utf8(file_info.name),
                                            xuid, title_id, content_type,
                                            content_data))) {
         result.emplace_back(std::move(content_data));
-      } else {
-        content_data.device_id = device_id;
-        content_data.content_type = content_type;
-        content_data.set_display_name(xe::path_to_utf16(file_info.name));
-        content_data.set_file_name(xe::path_to_utf8(file_info.name));
-        content_data.title_id = title_id;
-        content_data.xuid = xuid;
-        result.emplace_back(std::move(content_data));
+        continue;
       }
+
+      std::u16string display_name = xe::path_to_utf16(file_info.name);
+      if (file_info.type != xe::filesystem::FileInfo::Type::kDirectory) {
+        // A title can install content by copying the package file itself, so
+        // take the name a container carries instead of the extracted layout's
+        // directory name.
+        auto header = vfs::XContentContainerDevice::ReadContainerHeader(
+            file_info.path / file_info.name);
+        if (!header || !header->content_header.is_magic_valid()) {
+          continue;
+        }
+        auto container_name =
+            vfs::XContentContainerDevice::ContentDataFromHeader(*header)
+                .display_name();
+        if (!container_name.empty()) {
+          display_name = container_name;
+        }
+      }
+
+      content_data.device_id = device_id;
+      content_data.content_type = content_type;
+      content_data.set_display_name(display_name);
+      content_data.set_file_name(xe::path_to_utf8(file_info.name));
+      content_data.title_id = title_id;
+      content_data.xuid = xuid;
+      result.emplace_back(std::move(content_data));
     }
   }
   return result;
@@ -250,12 +298,11 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContentODD(
   auto content_type_str =
       fmt::format("{:08X}", static_cast<uint32_t>(content_type));
 
-  const std::filesystem::path game_content_path =
-      std::filesystem::path(kDefaultGameSymbolicLink) / "content" / xuid_str /
-      title_id_str / content_type_str;
+  const std::string game_content_path =
+      fmt::format("{}\\content\\{}\\{}\\{}", kernel_state_->title_mount_path_,
+                  xuid_str, title_id_str, content_type_str);
 
-  auto entry = kernel_state_->file_system()->ResolvePath(
-      xe::path_to_utf8(game_content_path));
+  auto entry = kernel_state_->file_system()->ResolvePath(game_content_path);
 
   if (!entry) {
     return {};
@@ -288,6 +335,9 @@ std::unique_ptr<ContentPackage> ContentManager::ResolvePackage(
 
   auto package = std::make_unique<ContentPackage>(kernel_state_, root_name,
                                                   data, package_path);
+  if (!package->is_mounted()) {
+    return nullptr;
+  }
   return package;
 }
 
@@ -382,7 +432,9 @@ X_RESULT ContentManager::CreateContent(const std::string_view root_name,
   }
 
   auto package = ResolvePackage(root_name, xuid, data);
-  assert_not_null(package);
+  if (!package) {
+    return X_ERROR_ACCESS_DENIED;
+  }
 
   open_packages_.insert(
       {string_key_insensitive::create(root_name), package.release()});
@@ -410,13 +462,15 @@ X_RESULT ContentManager::OpenContent(const std::string_view root_name,
 
   // Open package.
   auto package = ResolvePackage(root_name, xuid, data, disc_number);
-  assert_not_null(package);
+  if (!package) {
+    return X_ERROR_FILE_NOT_FOUND;
+  }
 
   package->LoadPackageLicenseMask(ResolvePackageHeaderPath(
       data.file_name(), xuid, kernel_state_->title_id(), data.content_type));
 
   content_license = package->GetPackageLicense();
-  if (static_cast<uint32_t>(cvars::license_mask) > 1) {
+  if (static_cast<uint32_t>(cvars::license_mask) > 0) {
     content_license |= cvars::license_mask;
   }
 
@@ -444,9 +498,9 @@ X_RESULT ContentManager::CloseContent(const std::string_view root_name) {
   if (it == open_packages_.end()) {
     return X_ERROR_FILE_NOT_FOUND;
   }
-  CloseOpenedFilesFromContent(root_name);
-
   auto package = it->second;
+  CloseOpenedFilesFromContent(*package);
+
   open_packages_.erase(it);
   delete package;
 
@@ -459,7 +513,7 @@ X_RESULT ContentManager::GetContentThumbnail(
   auto global_lock = global_critical_region_.Acquire();
 
   auto package_path = ResolvePackagePath(xuid, data);
-  auto thumb_path = package_path / kThumbnailFileName;
+  auto thumb_path = package_path / vfs::kPackageThumbnailFileName;
   if (std::filesystem::exists(thumb_path)) {
     auto file = xe::filesystem::OpenFile(thumb_path, "rb");
     size_t file_len = std::filesystem::file_size(thumb_path);
@@ -477,16 +531,27 @@ X_RESULT ContentManager::SetContentThumbnail(
     std::vector<uint8_t> buffer) {
   auto global_lock = global_critical_region_.Acquire();
   auto package_path = ResolvePackagePath(xuid, data);
-  std::filesystem::create_directories(package_path);
-  if (std::filesystem::exists(package_path)) {
-    auto thumb_path = package_path / kThumbnailFileName;
-    auto file = xe::filesystem::OpenFile(thumb_path, "wb");
-    fwrite(buffer.data(), 1, buffer.size(), file);
-    fclose(file);
+  std::error_code ec;
+  if (std::filesystem::exists(package_path, ec) &&
+      !std::filesystem::is_directory(package_path, ec)) {
+    // A package kept as one container file carries its thumbnail in its
+    // header and is mounted read-only, so there is nowhere to write one.
+    XELOGW("{}: {} is a container file, thumbnail not written", __func__,
+           package_path);
     return X_ERROR_SUCCESS;
-  } else {
+  }
+  std::filesystem::create_directories(package_path, ec);
+  if (!std::filesystem::is_directory(package_path, ec)) {
     return X_ERROR_FILE_NOT_FOUND;
   }
+  auto thumb_path = package_path / vfs::kPackageThumbnailFileName;
+  auto file = xe::filesystem::OpenFile(thumb_path, "wb");
+  if (!file) {
+    return X_ERROR_ACCESS_DENIED;
+  }
+  fwrite(buffer.data(), 1, buffer.size(), file);
+  fclose(file);
+  return X_ERROR_SUCCESS;
 }
 
 X_RESULT ContentManager::DeleteContent(const uint64_t xuid,
@@ -524,20 +589,17 @@ bool ContentManager::IsContentOpen(const XCONTENT_AGGREGATE_DATA& data) const {
 }
 
 void ContentManager::CloseOpenedFilesFromContent(
-    const std::string_view root_name) {
+    const ContentPackage& package) {
   // TODO(Gliniak): Cleanup this code to care only about handles
   // related to provided content
   const std::vector<object_ref<XFile>> all_files_handles =
       kernel_state_->object_table()->GetObjectsByType<XFile>(
           XObject::Type::File);
 
-  std::string resolved_path = "";
-  kernel_state_->file_system()->FindSymbolicLink(std::string(root_name) + ':',
-                                                 resolved_path);
-
   for (const object_ref<XFile>& file : all_files_handles) {
     std::string file_path = file->entry()->absolute_path();
-    bool is_file_inside_content = utf8::starts_with(file_path, resolved_path);
+    bool is_file_inside_content =
+        utf8::starts_with(file_path, package.device_path());
 
     if (is_file_inside_content) {
       file->ReleaseHandle();
@@ -577,8 +639,11 @@ bool ContentManager::UpdateSpaData(vfs::Entry* spa_file_update) {
   std::vector<uint8_t> data(spa_file_update->size());
 
   size_t read_bytes = 0;
-  if (file->ReadSync(std::span<uint8_t>(data.data(), spa_file_update->size()),
-                     0, &read_bytes) != X_STATUS_SUCCESS) {
+  const X_STATUS read_result = file->ReadSync(
+      std::span<uint8_t>(data.data(), spa_file_update->size()), 0, &read_bytes);
+  // An open handle keeps the package's device alive after CloseContent.
+  file->Destroy();
+  if (read_result != X_STATUS_SUCCESS) {
     return false;
   }
 

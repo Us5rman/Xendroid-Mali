@@ -7,7 +7,11 @@
  ******************************************************************************
  */
 
+#include <algorithm>
+#include <cerrno>
+
 #include "xenia/base/logging.h"
+#include "xenia/kernel/guest_scheduler.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/xam_module.h"
@@ -415,8 +419,9 @@ dword_result_t NetDll_WSAWaitForMultipleEvents_entry(dword_t num_events,
   X_STATUS result = 0;
   do {
     result = xboxkrnl::xeNtWaitForMultipleObjectsEx(
-        num_events, events, wait_all, 1, alertable,
-        timeout != -1 ? &timeout_wait : nullptr);
+        num_events, events,
+        wait_all ? X_KWAIT_REASON::WaitAll : X_KWAIT_REASON::WaitAny, 1,
+        alertable, timeout != -1 ? &timeout_wait : nullptr);
   } while (result == X_STATUS_ALERTED);
 
   if (XFAILED(result)) {
@@ -424,7 +429,8 @@ dword_result_t NetDll_WSAWaitForMultipleEvents_entry(dword_t num_events,
     XThread::SetLastError(error);
     return ~0u;
   }
-  return 0;
+  // The signaled event's index, WSA_WAIT_TIMEOUT or WSA_WAIT_IO_COMPLETION.
+  return result;
 }
 DECLARE_XAM_EXPORT2(NetDll_WSAWaitForMultipleEvents, kNetworking, kImplemented,
                     kBlocking);
@@ -889,9 +895,9 @@ dword_result_t NetDll_accept_entry(dword_t caller, dword_t socket_handle,
     *addrlen_ptr = native_len;
 
     return new_socket->handle();
-  } else {
-    return -1;
   }
+  XThread::SetLastError(socket->GetLastWSAError());
+  return -1;
 }
 DECLARE_XAM_EXPORT1(NetDll_accept, kNetworking, kImplemented);
 
@@ -904,9 +910,39 @@ struct host_set {
   uint32_t count;
   object_ref<XSocket> sockets[64];
 
-  void Load(const x_fd_set* guest_set) {
-    assert_true(guest_set->fd_count < 64);
-    this->count = guest_set->fd_count;
+  // Whether select can take a native handle: still open (another guest thread
+  // can close a socket while select waits, leaving -1) and, on POSIX, below
+  // FD_SETSIZE - bionic's FORTIFY checks abort FD_SET and FD_ISSET otherwise.
+  static bool IsSelectable(uint64_t handle) {
+    if (handle == static_cast<uint64_t>(-1)) {
+      return false;
+    }
+#ifndef XE_PLATFORM_WIN32
+    if (handle >= FD_SETSIZE) {
+      return false;
+    }
+#endif
+    return true;
+  }
+
+  // POSIX select takes the highest descriptor plus one. The guest's nfds is
+  // for Winsock, which ignores it, and titles pass 0 or anything.
+  int NativeNfds() const {
+    int nfds = 0;
+    for (uint32_t i = 0; i < this->count; ++i) {
+      const uint64_t handle = this->sockets[i]->native_handle();
+      if (IsSelectable(handle)) {
+        nfds = std::max(nfds, int(handle) + 1);
+      }
+    }
+    return nfds;
+  }
+
+  // False when a handle names no socket, which Winsock fails with
+  // WSAENOTSOCK. The guest count is clamped to the 64 the set holds.
+  bool Load(const x_fd_set* guest_set) {
+    assert_true(guest_set->fd_count <= 64);
+    this->count = std::min(uint32_t(guest_set->fd_count), uint32_t(64));
     for (uint32_t i = 0; i < this->count; ++i) {
       auto socket_handle = static_cast<X_HANDLE>(guest_set->fd_array[i]);
       if (socket_handle == -1) {
@@ -916,9 +952,13 @@ struct host_set {
       // Convert from Xenia -> native
       auto socket =
           kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
-      assert_not_null(socket);
+      if (!socket) {
+        this->count = i;
+        return false;
+      }
       this->sockets[i] = socket;
     }
+    return true;
   }
 
   void Store(x_fd_set* guest_set) {
@@ -932,7 +972,10 @@ struct host_set {
   void Store(fd_set* native_set) {
     FD_ZERO(native_set);
     for (uint32_t i = 0; i < this->count; ++i) {
-      FD_SET(this->sockets[i]->native_handle(), native_set);
+      const auto handle = this->sockets[i]->native_handle();
+      if (IsSelectable(handle)) {
+        FD_SET(handle, native_set);
+      }
     }
   }
 
@@ -940,7 +983,8 @@ struct host_set {
     uint32_t new_count = 0;
     for (uint32_t i = 0; i < this->count; ++i) {
       auto socket = this->sockets[i];
-      if (FD_ISSET(socket->native_handle(), native_set)) {
+      const auto handle = socket->native_handle();
+      if (IsSelectable(handle) && FD_ISSET(handle, native_set)) {
         this->sockets[new_count++] = socket;
       }
     }
@@ -959,19 +1003,28 @@ int_result_t NetDll_select_entry(dword_t caller, dword_t nfds,
   host_set host_readfds = {0};
   fd_set native_readfds = {0};
   if (readfds) {
-    host_readfds.Load(readfds);
+    if (!host_readfds.Load(readfds)) {
+      XThread::SetLastError(uint32_t(X_WSAError::X_WSAENOTSOCK));
+      return -1;
+    }
     host_readfds.Store(&native_readfds);
   }
   host_set host_writefds = {0};
   fd_set native_writefds = {0};
   if (writefds) {
-    host_writefds.Load(writefds);
+    if (!host_writefds.Load(writefds)) {
+      XThread::SetLastError(uint32_t(X_WSAError::X_WSAENOTSOCK));
+      return -1;
+    }
     host_writefds.Store(&native_writefds);
   }
   host_set host_exceptfds = {0};
   fd_set native_exceptfds = {0};
   if (exceptfds) {
-    host_exceptfds.Load(exceptfds);
+    if (!host_exceptfds.Load(exceptfds)) {
+      XThread::SetLastError(uint32_t(X_WSAError::X_WSAENOTSOCK));
+      return -1;
+    }
     host_exceptfds.Store(&native_exceptfds);
   }
   timeval* timeout_in = nullptr;
@@ -984,9 +1037,64 @@ int_result_t NetDll_select_entry(dword_t caller, dword_t nfds,
         reinterpret_cast<int32_t*>(&timeout.tv_usec));
     timeout_in = &timeout;
   }
-  int ret = select(nfds, readfds ? &native_readfds : nullptr,
+#ifdef XE_PLATFORM_WIN32
+  const int native_nfds = int(nfds);
+#else
+  const int native_nfds = std::max(
+      {host_readfds.NativeNfds(), host_writefds.NativeNfds(),
+       host_exceptfds.NativeNfds()});
+#endif
+  int ret;
+  if (!GuestScheduler::CurrentThreadOffloadsBlockingCalls()) {
+    ret = select(native_nfds, readfds ? &native_readfds : nullptr,
+                 writefds ? &native_writefds : nullptr,
+                 exceptfds ? &native_exceptfds : nullptr, timeout_in);
+  } else {
+    // A blocking select would stall the other guest threads on this host
+    // thread. Poll instead and park between polls until the timeout.
+    auto* scheduler = kernel_state()->guest_scheduler();
+    uint64_t deadline_ms = 0;
+    if (timeout_in) {
+      // Rounded up so it never waits less than asked.
+      deadline_ms = Clock::QueryHostUptimeMillis() +
+                    uint64_t(timeout.tv_sec) * 1000 +
+                    (timeout.tv_usec + 999) / 1000;
+    }
+    while (true) {
+      timeval poll_timeout = {0, 0};
+      ret = select(native_nfds, readfds ? &native_readfds : nullptr,
                    writefds ? &native_writefds : nullptr,
-                   exceptfds ? &native_exceptfds : nullptr, timeout_in);
+                   exceptfds ? &native_exceptfds : nullptr, &poll_timeout);
+      if (ret != 0 ||
+          (timeout_in && Clock::QueryHostUptimeMillis() >= deadline_ms)) {
+        break;
+      }
+      // A select with nothing ready empties the sets. Refill them first.
+      if (readfds) {
+        host_readfds.Store(&native_readfds);
+      }
+      if (writefds) {
+        host_writefds.Store(&native_writefds);
+      }
+      if (exceptfds) {
+        host_exceptfds.Store(&native_exceptfds);
+      }
+      scheduler->BlockCurrentThread(deadline_ms);
+    }
+  }
+  if (ret == -1) {
+    // The sets are undefined after a failure: none of the sockets is ready.
+#ifdef XE_PLATFORM_WIN32
+    const bool bad_socket = WSAGetLastError() == WSAENOTSOCK;
+#else
+    const bool bad_socket = errno == EBADF;
+#endif
+    XThread::SetLastError(uint32_t(bad_socket ? X_WSAError::X_WSAENOTSOCK
+                                              : X_WSAError::X_WSAEINVAL));
+    host_readfds.count = 0;
+    host_writefds.count = 0;
+    host_exceptfds.count = 0;
+  }
   if (readfds) {
     host_readfds.UpdateFrom(&native_readfds);
     host_readfds.Store(readfds);
@@ -1015,7 +1123,11 @@ dword_result_t NetDll_recv_entry(dword_t caller, dword_t socket_handle,
     return -1;
   }
 
-  return socket->Recv(buf_ptr, buf_len, flags);
+  const int ret = socket->Recv(buf_ptr, buf_len, flags);
+  if (ret == -1) {
+    XThread::SetLastError(socket->GetLastWSAError());
+  }
+  return ret;
 }
 DECLARE_XAM_EXPORT1(NetDll_recv, kNetworking, kImplemented);
 
@@ -1071,7 +1183,11 @@ dword_result_t NetDll_send_entry(dword_t caller, dword_t socket_handle,
     return -1;
   }
 
-  return socket->Send(buf_ptr, buf_len, flags);
+  const int ret = socket->Send(buf_ptr, buf_len, flags);
+  if (ret == -1) {
+    XThread::SetLastError(socket->GetLastWSAError());
+  }
+  return ret;
 }
 DECLARE_XAM_EXPORT1(NetDll_send, kNetworking, kImplemented);
 
@@ -1092,6 +1208,9 @@ dword_result_t NetDll_sendto_entry(dword_t caller, dword_t socket_handle,
 
   N_XSOCKADDR_IN native_to(to_ptr);
   int ret = socket->SendTo(buf_ptr, buf_len, flags, &native_to, to_len);
+  if (ret == -1) {
+    XThread::SetLastError(socket->GetLastWSAError());
+  }
   return ret;
 }
 DECLARE_XAM_EXPORT1(NetDll_sendto, kNetworking, kImplemented);
@@ -1142,27 +1261,49 @@ void NetDll_WSASetLastError_entry(dword_t error_code) {
 }
 DECLARE_XAM_EXPORT1(NetDll_WSASetLastError, kNetworking, kImplemented);
 
-dword_result_t NetDll_getsockname_entry(dword_t caller, dword_t socket_handle,
-                                        lpvoid_t buf_ptr, lpdword_t len_ptr) {
+// getsockname and getpeername, which write the guest's sockaddr_in.
+static int GetSocketName(uint32_t socket_handle, bool peer,
+                         pointer_t<XSOCKADDR_IN> name_ptr, lpdword_t len_ptr) {
   auto socket =
       kernel_state()->object_table()->LookupObject<XSocket>(socket_handle);
   if (!socket) {
     XThread::SetLastError(uint32_t(X_WSAError::X_WSAENOTSOCK));
     return -1;
   }
+  if (!name_ptr || !len_ptr || *len_ptr < sizeof(XSOCKADDR_IN)) {
+    XThread::SetLastError(uint32_t(X_WSAError::X_WSAEFAULT));
+    return -1;
+  }
 
-  int buffer_len = *len_ptr;
-
-  X_STATUS status = socket->GetSockName(buf_ptr, &buffer_len);
+  N_XSOCKADDR_IN name;
+  X_STATUS status =
+      peer ? socket->GetPeerName(&name) : socket->GetSockName(&name);
   if (XFAILED(status)) {
     XThread::SetLastError(socket->GetLastWSAError());
     return -1;
   }
 
-  *len_ptr = buffer_len;
+  name_ptr->sin_family = name.sin_family;
+  name_ptr->sin_port = name.sin_port;
+  name_ptr->sin_addr = name.sin_addr;
+  std::memset(name_ptr->x_sin_zero, 0, sizeof(name_ptr->x_sin_zero));
+  *len_ptr = sizeof(XSOCKADDR_IN);
   return 0;
 }
+
+dword_result_t NetDll_getsockname_entry(dword_t caller, dword_t socket_handle,
+                                        pointer_t<XSOCKADDR_IN> name_ptr,
+                                        lpdword_t len_ptr) {
+  return GetSocketName(socket_handle, false, name_ptr, len_ptr);
+}
 DECLARE_XAM_EXPORT1(NetDll_getsockname, kNetworking, kImplemented);
+
+dword_result_t NetDll_getpeername_entry(dword_t caller, dword_t socket_handle,
+                                        pointer_t<XSOCKADDR_IN> name_ptr,
+                                        lpdword_t len_ptr) {
+  return GetSocketName(socket_handle, true, name_ptr, len_ptr);
+}
+DECLARE_XAM_EXPORT1(NetDll_getpeername, kNetworking, kImplemented);
 
 dword_result_t NetDll_XNetCreateKey_entry(dword_t caller, lpdword_t key_id,
                                           lpdword_t exchange_key) {

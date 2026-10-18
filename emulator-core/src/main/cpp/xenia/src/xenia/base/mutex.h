@@ -73,10 +73,7 @@ class xe_unlikely_mutex {
     } else {
       do {
         // chrispy: warning, if no SMT, mm_pause does nothing...
-#if XE_ARCH_AMD64 == 1
-        _mm_pause();
-#endif
-
+        SpinPause();
       } while (!_tryget());
     }
   }
@@ -142,9 +139,7 @@ class xe_unlikely_mutex {
     }
     // Spin a bit before yielding
     for (int i = 0; i < XE_LINUX_MUTEX_SPINCOUNT; ++i) {
-#if XE_ARCH_AMD64 == 1
-      _mm_pause();
-#endif
+      SpinPause();
       if (_tryget()) {
         return;
       }

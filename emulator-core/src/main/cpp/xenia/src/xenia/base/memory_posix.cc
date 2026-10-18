@@ -23,6 +23,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 
 #if XE_PLATFORM_MAC
 #include <mach/mach.h>
@@ -81,7 +82,10 @@ void AndroidShutdown() {
 }
 #endif
 
-size_t page_size() { return getpagesize(); }
+size_t page_size() {
+  static const size_t value = static_cast<size_t>(getpagesize());
+  return value;
+}
 size_t allocation_granularity() { return page_size(); }
 
 uint32_t ToPosixProtectFlags(PageAccess access) {
@@ -178,6 +182,27 @@ static void InstallCleanupHandlers() {
 }
 #endif  // !XE_PLATFORM_ANDROID
 
+// Lets a Win32-style length-0 release find the reservation's extent.
+static std::mutex g_reservations_mutex;
+static std::unordered_map<void*, size_t> g_reservations;
+
+static void RememberReservation(void* base_address, size_t length) {
+  std::lock_guard guard(g_reservations_mutex);
+  g_reservations[base_address] = length;
+}
+
+// Erase before munmap: a concurrent AllocFixed may reuse the address.
+static size_t TakeReservationLength(void* base_address) {
+  std::lock_guard guard(g_reservations_mutex);
+  auto it = g_reservations.find(base_address);
+  if (it == g_reservations.end()) {
+    return 0;
+  }
+  const size_t length = it->second;
+  g_reservations.erase(it);
+  return length;
+}
+
 void* AllocFixed(void* base_address, size_t length,
                  AllocationType allocation_type, PageAccess access) {
   // mmap does not support reserve / commit, so ignore allocation_type.
@@ -226,6 +251,7 @@ void* AllocFixed(void* base_address, size_t length,
     return nullptr;
   }
 
+  RememberReservation(result, length);
   return result;
 }
 
@@ -238,6 +264,7 @@ bool DeallocFixed(void* base_address, size_t length,
   std::lock_guard guard(g_mapped_file_ranges_mutex);
   for (const auto& mapped_range : mapped_file_ranges) {
     if (region_begin >= mapped_range.region_begin &&
+        region_begin < mapped_range.region_end &&
         region_end <= mapped_range.region_end) {
       switch (deallocation_type) {
         case DeallocationType::kDecommit:
@@ -253,8 +280,25 @@ bool DeallocFixed(void* base_address, size_t length,
   switch (deallocation_type) {
     case DeallocationType::kDecommit:
       return Protect(base_address, length, PageAccess::kNoAccess);
-    case DeallocationType::kRelease:
-      return munmap(base_address, length) == 0;
+    case DeallocationType::kRelease: {
+      // memory_win.cc passes length 0 for MEM_RELEASE; munmap rejects 0.
+      const size_t recorded = length ? 0 : TakeReservationLength(base_address);
+      const size_t release_length = length ? length : recorded;
+      if (!release_length) {
+        XELOGE(
+            "DeallocFixed: release of {} with length 0, but that address is "
+            "not a known reservation; refusing to guess",
+            base_address);
+        return false;
+      }
+      if (munmap(base_address, release_length) != 0) {
+        if (recorded) {
+          RememberReservation(base_address, recorded);
+        }
+        return false;
+      }
+      return true;
+    }
     default:
       assert_unhandled_case(deallocation_type);
   }

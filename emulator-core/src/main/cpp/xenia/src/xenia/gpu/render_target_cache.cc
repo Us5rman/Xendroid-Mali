@@ -245,13 +245,10 @@ DEFINE_bool(
     value_convert_7e3_8888_reuse, true,
     "Decode (HDR float to LDR unorm) instead of bit-reinterpreting when a 7e3 "
     "(2_10_10_10_FLOAT) EDRAM tile is reused in place as 8_8_8_8 and the "
-    "reusing "
-    "draw blends over it, so the background is not colored garbage (e.g. "
-    "Deadly "
-    "Premonition foliage).\n"
+    "reusing draw blends over it, so the background is not colored garbage "
+    "(e.g. Deadly Premonition foliage).\n"
     "On by default. Set to false to force bit-exact reinterpretation if a "
-    "title "
-    "regresses.",
+    "title regresses.",
     "GPU");
 UPDATE_from_bool(value_convert_7e3_8888_reuse, 2026, 6, 28, 12, false);
 // Enabled by default as the GPU is overall usually the bottleneck when the
@@ -1106,6 +1103,18 @@ bool RenderTargetCache::IsDrawScaleNative() const {
                                rb_surface_info.msaa_samples);
 }
 
+// Whether blending reads the render target's current contents. A channel the
+// draw doesn't write can't store a blend result, so its factor says nothing.
+// The operation doesn't matter, the Xenos applies the factors to MIN and MAX
+// too unlike hosts.
+static bool DoesBlendReadDestination(reg::RB_BLENDCONTROL blend_control,
+                                     uint32_t write_mask) {
+  return ((write_mask & 0b0111) &&
+          blend_control.color_destblend != xenos::BlendFactor::kZero) ||
+         ((write_mask & 0b1000) &&
+          blend_control.alpha_destblend != xenos::BlendFactor::kZero);
+}
+
 bool RenderTargetCache::Update(bool is_rasterization_done,
                                reg::RB_DEPTHCONTROL normalized_depth_control,
                                uint32_t normalized_color_mask,
@@ -1175,6 +1184,8 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
   uint32_t edram_bases[1 + xenos::kMaxColorRenderTargets];
   uint32_t resource_formats[1 + xenos::kMaxColorRenderTargets];
   uint32_t rts_are_64bpp = 0;
+  // One bit per color render target, unshifted unlike the used bits.
+  uint32_t color_rts_blend_reading_dest = 0;
   if (is_rasterization_done) {
     if (normalized_depth_control.z_enable ||
         normalized_depth_control.stencil_enable) {
@@ -1195,6 +1206,12 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
       uint32_t rt_bit_index = 1 + i;
       depth_and_color_rts_used_bits |= uint32_t(1) << rt_bit_index;
       edram_bases[rt_bit_index] = color_info.color_base;
+      if (DoesBlendReadDestination(
+              regs.Get<reg::RB_BLENDCONTROL>(
+                  reg::RB_BLENDCONTROL::rt_register_indices[i]),
+              (normalized_color_mask >> (4 * i)) & 0b1111)) {
+        color_rts_blend_reading_dest |= uint32_t(1) << i;
+      }
       xenos::ColorRenderTargetFormat color_format =
           regs.Get<reg::RB_COLOR_INFO>(
                   reg::RB_COLOR_INFO::rt_register_indices[i])
@@ -1269,6 +1286,8 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
     // just check if old bindings can still be used.
     std::memset(last_update_used_render_targets_, 0,
                 sizeof(last_update_used_render_targets_));
+    std::memset(last_update_blend_reading_color_rts_, 0,
+                sizeof(last_update_blend_reading_color_rts_));
     if (are_accumulated_render_targets_valid_) {
       for (size_t i = 0;
            i < xe::countof(last_update_accumulated_render_targets_); ++i) {
@@ -1425,6 +1444,16 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
   // consistency, even if they fail in the implementation (just ignore that and
   // draw with whatever contents currently are in the render target in this
   // case).
+
+  // Slots dropped by the EDRAM base conflict elimination aren't drawn to.
+  uint32_t color_rts_blend_reading_dest_used =
+      color_rts_blend_reading_dest & (depth_and_color_rts_used_bits >> 1);
+  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
+    last_update_blend_reading_color_rts_[i] =
+        (color_rts_blend_reading_dest_used & (uint32_t(1) << i))
+            ? rt_keys[1 + i]
+            : RenderTargetKey();
+  }
 
   for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
     const std::pair<uint32_t, uint32_t>& rt_base_index = edram_bases_sorted[i];
@@ -1807,6 +1836,11 @@ bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(
     std::vector<Transfer>& color_transfers_out) {
   assert_true(GetPath() == Path::kHostRenderTargets);
 
+  // These transfers precede a clear rather than a draw, so drop the last
+  // draw's blending and keep IsTransferValueConverted7e3And8888 bit-exact.
+  std::memset(last_update_blend_reading_color_rts_, 0,
+              sizeof(last_update_blend_reading_color_rts_));
+
   uint32_t pitch_tiles_at_32bpp;
   uint32_t base_offset_tiles_at_32bpp;
   xenos::MsaaSamples msaa_samples;
@@ -1830,6 +1864,15 @@ bool RenderTargetCache::PrepareHostRenderTargetsResolveClear(
     return false;
   }
   assert_true(msaa_samples <= xenos::MsaaSamples::k4X);
+  if (msaa_samples > xenos::MsaaSamples::k4X) {
+    // Safety check because a lot of code assumes up to 4x, including arrays
+    // indexed by the sample count.
+    XELOGE(
+        "{}x MSAA requested by the guest in a resolve clear, Xenos only "
+        "supports up to 4x",
+        uint32_t(1) << uint32_t(msaa_samples));
+    return false;
+  }
   if (!pitch_tiles_at_32bpp) {
     return false;
   }
@@ -2147,32 +2190,23 @@ bool RenderTargetCache::IsTransferValueConverted7e3And8888(
       source.msaa_samples != dest.msaa_samples) {
     return false;
   }
-  auto is_7e3 = [](xenos::ColorRenderTargetFormat format) {
-    return format == xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT ||
-           format == xenos::ColorRenderTargetFormat::
-                         k_2_10_10_10_FLOAT_AS_16_16_16_16;
-  };
-  // 7e3 -> plain 8_8_8_8 only. The reverse and gamma dests stay bit-exact.
-  if (!is_7e3(source.GetColorFormat()) ||
+  // 7e3 to plain 8_8_8_8 only. The reverse, and a gamma dest wherever its
+  // resource format is distinct, stay bit-exact.
+  if (xenos::GetStorageColorFormat(source.GetColorFormat()) !=
+          xenos::ColorRenderTargetFormat::k_2_10_10_10_FLOAT ||
       dest.GetColorFormat() != xenos::ColorRenderTargetFormat::k_8_8_8_8) {
     return false;
   }
-  // Decode only if the draw blends over the dest, so the bytes are actually
-  // read.
-  const RegisterFile& regs = register_file();
-  bool dest_blends = false;
-  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
-    if (regs.Get<reg::RB_COLOR_INFO>(reg::RB_COLOR_INFO::rt_register_indices[i])
-            .color_base != dest.base_tiles) {
-      continue;
+  // Only if the draw blends over the dest, so the bytes are actually read.
+  // Matching the whole key, as the blending of a slot that isn't drawn to
+  // says nothing about this dest.
+  for (RenderTargetKey blend_reading_rt :
+       last_update_blend_reading_color_rts_) {
+    if (blend_reading_rt == dest) {
+      return true;
     }
-    auto blend = regs.Get<reg::RB_BLENDCONTROL>(
-        reg::RB_BLENDCONTROL::rt_register_indices[i]);
-    dest_blends = blend.color_destblend != xenos::BlendFactor::kZero ||
-                  blend.alpha_destblend != xenos::BlendFactor::kZero;
-    break;
   }
-  return dest_blends;
+  return false;
 }
 
 bool RenderTargetCache::WouldOwnershipChangeRequireTransfers(

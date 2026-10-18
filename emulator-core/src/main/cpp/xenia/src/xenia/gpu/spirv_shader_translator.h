@@ -36,13 +36,12 @@ namespace gpu {
 class SpirvShaderTranslator : public ShaderTranslator {
  public:
   union Modification {
-    // If anything in this is structure is changed in a way not compatible with
+    // If anything in this structure is changed in a way not compatible with
     // the previous layout, invalidate the pipeline storages by increasing this
-    // version number (0xYYYYMMDD)!
-    // TODO(Triang3l): Change to 0xYYYYMMDD once it's out of the rapid
-    // prototyping stage (easier to do small granular updates with an
-    // incremental counter).
-    static constexpr uint32_t kVersion = 17;
+    // version number! Backends add it to their dated
+    // PipelineDescription::kVersion, so bumping either one is enough. Only
+    // ever raise it, a reverted layout change needs another bump.
+    static constexpr uint32_t kVersion = 18;
 
     enum class DepthStencilMode : uint32_t {
       kNoModifiers,
@@ -352,7 +351,8 @@ class SpirvShaderTranslator : public ShaderTranslator {
     // Integer num_format on fixed textures. Each dword packs the scale needed
     // to turn normalized host samples back into guest integer values.
     // bits 0:3 = component_bits - 1
-    // bit 4 = signed.
+    // bit 4 = signed
+    // bit 5 = unsigned-biased
     // Zero means no scale.
     // Appended at the very tail (std140 uint4 [35]) so it disturbs neither the
     // xenos_draw.glsli tessellation offsets nor the interpreter [34] slot.

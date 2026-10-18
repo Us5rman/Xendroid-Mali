@@ -542,8 +542,9 @@ void PPCHIRBuilder::UpdateCR(uint32_t n, Value* lhs, Value* rhs,
   Value* eq = CompareEQ(lhs, rhs);
   StoreContext(offsetof(PPCContext, cr0) + (4 * n) + 2, eq);
 
-  // Value* so = AllocValue(UINT8_TYPE);
-  // StoreContext(offsetof(PPCContext, cr) + (4 * n) + 3, so);
+  // A snapshot of XER[SO], so it cannot be resolved lazily at mfcr time.
+  StoreContext(offsetof(PPCContext, cr0) + (4 * n) + 3,
+               LoadContext(offsetof(PPCContext, xer_so), INT8_TYPE));
 
   // TOOD(benvanik): trace CR.
 }
@@ -551,7 +552,6 @@ void PPCHIRBuilder::UpdateCR(uint32_t n, Value* lhs, Value* rhs,
 void PPCHIRBuilder::UpdateCR6(Value* src_value) {
   // Testing for all 1's and all 0's.
   // if (Rc) CR6 = all_equal | 0 | none_equal | 0
-  // TODO(benvanik): efficient instruction?
 
   // chrispy: nothing seems to write cr6_1, figure out if no documented
   // instructions write anything other than 0 to it and remove these stores if
@@ -559,8 +559,9 @@ void PPCHIRBuilder::UpdateCR6(Value* src_value) {
   StoreContext(offsetof(PPCContext, cr6.cr6_1), LoadZeroInt8());
   StoreContext(offsetof(PPCContext, cr6.cr6_3), LoadZeroInt8());
   StoreContext(offsetof(PPCContext, cr6.cr6_all_equal),
-               IsFalse(Not(src_value)));
-  StoreContext(offsetof(PPCContext, cr6.cr6_none_equal), IsFalse(src_value));
+               VectorAllSet(src_value));
+  StoreContext(offsetof(PPCContext, cr6.cr6_none_equal),
+               VectorNoneSet(src_value));
 
   // TOOD(benvanik): trace CR.
 }
@@ -632,15 +633,32 @@ void PPCHIRBuilder::CopyFPSCRToCR1() {
                And(Truncate(Shr(fpscr, 28), INT8_TYPE), LoadConstantInt8(1)));
 }
 
+// SO is bit 31, OV bit 30, CA bit 29, with no byte count modelled.
 Value* PPCHIRBuilder::LoadXER() {
   Value* v = Shl(ZeroExtend(LoadCA(), INT64_TYPE), 29);
-  // TODO(benvanik): construct with other flags; overflow, etc?
-  return v;
+  v = Or(v, Shl(ZeroExtend(LoadContext(offsetof(PPCContext, xer_ov), INT8_TYPE),
+                           INT64_TYPE),
+                30));
+  return Or(v,
+            Shl(ZeroExtend(LoadContext(offsetof(PPCContext, xer_so), INT8_TYPE),
+                           INT64_TYPE),
+                31));
 }
 
 void PPCHIRBuilder::StoreXER(Value* value) {
-  // TODO(benvanik): use other fields? For now, just pull out CA.
   StoreCA(Truncate(And(Shr(value, 29), LoadConstantInt64(1)), INT8_TYPE));
+  StoreContext(offsetof(PPCContext, xer_ov),
+               Truncate(And(Shr(value, 30), LoadConstantInt64(1)), INT8_TYPE));
+  StoreContext(offsetof(PPCContext, xer_so),
+               Truncate(And(Shr(value, 31), LoadConstantInt64(1)), INT8_TYPE));
+}
+
+void PPCHIRBuilder::StoreOV(Value* value) {
+  assert_true(value->type == INT8_TYPE);
+  StoreContext(offsetof(PPCContext, xer_ov), value);
+  // Sticky until mtxer or mcrxr clears it.
+  StoreContext(offsetof(PPCContext, xer_so),
+               Or(LoadContext(offsetof(PPCContext, xer_so), INT8_TYPE), value));
 }
 
 Value* PPCHIRBuilder::LoadCA() {

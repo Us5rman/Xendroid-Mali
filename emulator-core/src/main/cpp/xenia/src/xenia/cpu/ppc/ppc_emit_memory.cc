@@ -859,6 +859,8 @@ int InstrEmit_stdcx(PPCHIRBuilder& f, const InstrData& i) {
   }
   f.StoreContext(offsetof(PPCContext, cr0.cr0_lt), f.LoadZeroInt8());
   f.StoreContext(offsetof(PPCContext, cr0.cr0_gt), f.LoadZeroInt8());
+  f.StoreContext(offsetof(PPCContext, cr0.cr0_so),
+                 f.LoadContext(offsetof(PPCContext, xer_so), INT8_TYPE));
   return 0;
 }
 
@@ -890,6 +892,8 @@ int InstrEmit_stwcx(PPCHIRBuilder& f, const InstrData& i) {
 
   f.StoreContext(offsetof(PPCContext, cr0.cr0_lt), f.LoadZeroInt8());
   f.StoreContext(offsetof(PPCContext, cr0.cr0_gt), f.LoadZeroInt8());
+  f.StoreContext(offsetof(PPCContext, cr0.cr0_so),
+                 f.LoadContext(offsetof(PPCContext, xer_so), INT8_TYPE));
 
   return 0;
 }

@@ -34,10 +34,12 @@ class StackLayout {
    *  | q10, q11         | sp + 0x080
    *  | q12, q13         | sp + 0x0A0
    *  | q14, q15         | sp + 0x0C0
+   *  | host FPCR        | sp + 0x0E0  (HostToGuestThunk, 16 bytes)
    *  +------------------+
-   *  Total: 0xE0 = 224 bytes (16-byte aligned)
+   *  Total: 0xF0 = 240 bytes (16-byte aligned)
    */
-  static constexpr size_t THUNK_STACK_SIZE = 224;
+  static constexpr size_t THUNK_STACK_SIZE = 240;
+  static constexpr size_t THUNK_HOST_FPCR = 0xE0;
 
   /**
    * ARM64 Guest Stack Layout

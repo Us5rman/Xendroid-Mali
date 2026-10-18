@@ -563,7 +563,11 @@ static void MMIOAwareStore(void* _ctx, unsigned int guestaddr, T value) {
   if (swap) {
     value = xe::byte_swap(value);
   }
-  if (guestaddr >= 0xE0000000) {
+  // Mirrors PhysicalHeap::Initialize: the 0xE0000000 alias only carries the
+  // 4 KB host offset when the host allocation granularity is coarser than a
+  // guest page and the view had to be mapped without it.
+  if (guestaddr >= 0xE0000000 &&
+      xe::memory::allocation_granularity() > 0x1000) {
     guestaddr += 0x1000;
   }
   auto ctx = reinterpret_cast<ppc::PPCContext*>(_ctx);
@@ -579,7 +583,11 @@ static void MMIOAwareStore(void* _ctx, unsigned int guestaddr, T value) {
 template <typename T, bool swap>
 static T MMIOAwareLoad(void* _ctx, unsigned int guestaddr) {
   T value;
-  if (guestaddr >= 0xE0000000) {
+  // Mirrors PhysicalHeap::Initialize: the 0xE0000000 alias only carries the
+  // 4 KB host offset when the host allocation granularity is coarser than a
+  // guest page and the view had to be mapped without it.
+  if (guestaddr >= 0xE0000000 &&
+      xe::memory::allocation_granularity() > 0x1000) {
     guestaddr += 0x1000;
   }
   auto ctx = reinterpret_cast<ppc::PPCContext*>(_ctx);
@@ -999,16 +1007,7 @@ struct STORE_F64 : Sequence<STORE_F64, I<OPCODE_STORE, VoidOp, I64Op, F64Op>> {
 struct STORE_V128
     : Sequence<STORE_V128, I<OPCODE_STORE, VoidOp, I64Op, V128Op>> {
   static void Emit(A64Emitter& e, const EmitArgType& i) {
-    // ComputeMemoryAddress may return x0, and LoadV128Const/SrcVReg clobber
-    // x0, so save the address to x17 when we need to load a constant source.
-    bool need_src_load =
-        i.src2.is_constant ||
-        (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP);
     auto addr = ComputeMemoryAddress(e, i.src1);
-    if (need_src_load) {
-      e.mov(e.x17, addr);
-      addr = e.x17;
-    }
     if (i.instr->flags & LoadStoreFlags::LOAD_STORE_BYTE_SWAP) {
       // Reverse bytes within each 32-bit word, store via scratch v0.
       int idx = SrcVReg(e, i.src2, 0);

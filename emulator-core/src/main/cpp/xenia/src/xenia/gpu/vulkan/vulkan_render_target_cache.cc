@@ -3071,6 +3071,18 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
       }
     } else if (!copy_shader_is_full_color) {
       return false;
+    } else if (copy_shader == draw_util::ResolveCopyShaderIndex::kFull8bpp &&
+               resolve_info.copy_dest_info.copy_dest_swap &&
+               xenos::ColorFormat(
+                   resolve_info.copy_dest_info.copy_dest_format) ==
+                   xenos::ColorFormat::k_8 &&
+               resolve_info.color_edram_info.msaa_samples >=
+                   xenos::MsaaSamples::k4X) {
+      // A8 (k_8 with LOW_BLUE) selects alpha. The 1x and 2x direct shaders
+      // load the scalar like the EDRAM path, but the 4x one is built from RGBA
+      // loads with the red/blue swap and would store blue, so leave it to the
+      // EDRAM path.
+      return false;
     }
   }
 
@@ -3533,21 +3545,14 @@ bool VulkanRenderTargetCache::TryDirectHostResolveCopy(
   // The scaled resolve buffer is bound for both reading (as the source render
   // target backing) and writing, so it needs shader-read/shader-write barriers
   // around the dispatches; shared memory uses the usage tracker instead.
+  // Pushed rather than recorded directly so SubmitBarriers ends the render pass
+  // around them (a render pass may still be open when the first one is made).
   auto emit_scaled_dest_buffer_barrier = [&](VkAccessFlags src_access,
                                              VkAccessFlags dst_access) {
-    VkBufferMemoryBarrier buffer_barrier = {};
-    buffer_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    buffer_barrier.srcAccessMask = src_access;
-    buffer_barrier.dstAccessMask = dst_access;
-    buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    buffer_barrier.buffer = write_descriptor_set_dest_buffer_info.buffer;
-    buffer_barrier.offset = 0;
-    buffer_barrier.size = VK_WHOLE_SIZE;
-    command_buffer.CmdVkPipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                                        0, nullptr, 1, &buffer_barrier, 0,
-                                        nullptr);
+    command_processor_.PushBufferMemoryBarrier(
+        write_descriptor_set_dest_buffer_info.buffer, 0, VK_WHOLE_SIZE,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, src_access, dst_access);
   };
 
   if (scaled_buffer_ready) {
@@ -4196,28 +4201,17 @@ bool VulkanRenderTargetCache::Resolve(
                                   resolve_info.copy_dest_extent_start,
                                   resolve_info.copy_dest_extent_length));
           } else {
-            // Scaled - add barrier for the scaled resolve buffer
-            // The buffer transitions from compute shader read (texture loading)
-            // to compute shader write
+            // Scaled - the buffer goes from compute shader read (texture
+            // loading) to compute shader write. Pushed rather than recorded
+            // directly so SubmitBarriers ends the render pass around it.
             VkBuffer scaled_buffer =
                 texture_cache.GetCurrentScaledResolveBuffer();
             if (scaled_buffer != VK_NULL_HANDLE) {
-              VkBufferMemoryBarrier buffer_barrier = {};
-              buffer_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-              // More specific: previous compute shader reads to compute shader
-              // write
-              buffer_barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-              buffer_barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-              buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-              buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-              buffer_barrier.buffer = scaled_buffer;
-              buffer_barrier.offset = 0;
-              buffer_barrier.size = VK_WHOLE_SIZE;
-
-              command_buffer.CmdVkPipelineBarrier(
-                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,  // From compute shader
-                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,  // To compute shader
-                  0, 0, nullptr, 1, &buffer_barrier, 0, nullptr);
+              command_processor_.PushBufferMemoryBarrier(
+                  scaled_buffer, 0, VK_WHOLE_SIZE,
+                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT);
             }
           }
           UseEdramBuffer(EdramBufferUsage::kComputeRead);
@@ -4264,25 +4258,16 @@ bool VulkanRenderTargetCache::Resolve(
             command_processor_.CloseMiscTimestamp();
           }
 
-          // Add barrier after writing to scaled resolve buffer
+          // Make the scaled resolve buffer write visible to later reads.
           if (scaled_buffer_ready) {
             VkBuffer scaled_buffer =
                 texture_cache.GetCurrentScaledResolveBuffer();
             if (scaled_buffer != VK_NULL_HANDLE) {
-              VkBufferMemoryBarrier buffer_barrier = {};
-              buffer_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-              buffer_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-              buffer_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-              buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-              buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-              buffer_barrier.buffer = scaled_buffer;
-              buffer_barrier.offset = 0;
-              buffer_barrier.size = VK_WHOLE_SIZE;
-
-              command_buffer.CmdVkPipelineBarrier(
+              command_processor_.PushBufferMemoryBarrier(
+                  scaled_buffer, 0, VK_WHOLE_SIZE,
                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1,
-                  &buffer_barrier, 0, nullptr);
+                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                  VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
             }
           }
 

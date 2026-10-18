@@ -76,7 +76,6 @@ target_link_libraries(xenia-app PRIVATE
   xenia-patcher
   xenia-ui
   xenia-vfs
-  aes_128
   capstone
   fmt
   dxbc

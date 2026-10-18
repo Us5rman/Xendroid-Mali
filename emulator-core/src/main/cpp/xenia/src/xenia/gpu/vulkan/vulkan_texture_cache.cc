@@ -978,6 +978,9 @@ VulkanTextureCache::SamplerParameters VulkanTextureCache::GetSamplerParameters(
           : binding.aniso_filter;
   parameters.mip_base_map = mip_filter == xenos::TextureFilter::kBaseMap;
 
+  if (parameters.mip_base_map && subres_base_page != 0) {
+    mip_min_level = 0;
+  }
   parameters.mip_min_level = mip_min_level;
   bool has_mips = mip_max_level > mip_min_level;
   // Apply anisotropic override, but only for mipmapped textures
@@ -1009,13 +1012,17 @@ VulkanTextureCache::SamplerParameters VulkanTextureCache::GetSamplerParameters(
           fetch.type == xenos::FetchConstantType::kTexture ||
           (fetch.type == xenos::FetchConstantType::kInvalidTexture &&
            cvars::gpu_allow_invalid_fetch_constants);
+      // A 1D texture wider than 8192 is valid, laid out in rows of 8192
+      // (BindingInfoFromFetchConstant), so its width is even.
+      const bool wide_1d =
+          fetch.dimension == xenos::DataDimension::k1D &&
+          subres_width_minus_1 >= xenos::kTexture2DCubeMaxWidthHeight;
       if (fetch_type_valid &&
           (subres_base_page != 0 || subres_mip_page != 0) &&
           !(fetch.dimension == xenos::DataDimension::k1D &&
-            (subres_width_minus_1 >= xenos::kTexture2DCubeMaxWidthHeight ||
-             fetch.tiled || fetch.packed_mips))) {
+            (fetch.tiled || fetch.packed_mips))) {
         xenos::TextureFormat format = GetBaseFormat(fetch.format);
-        bool width_odd = ((subres_width_minus_1 + 1) & 1) != 0;
+        bool width_odd = !wide_1d && ((subres_width_minus_1 + 1) & 1) != 0;
         const HostFormatPair& host_format_pair =
             (format == xenos::TextureFormat::k_Cr_Y1_Cb_Y0_REP && width_odd)
                 ? kHostFormatGBGRUnaligned

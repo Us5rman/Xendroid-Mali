@@ -50,7 +50,9 @@ def syncEngineLicenses = tasks.register('syncEngineLicenses', Sync) {
         from('../emulator-core/src/main/cpp/third_party/lsfg/LICENSE') { rename { 'lsfg-GPL-3.0.txt' } }
         from('../emulator-core/src/main/cpp/third_party/lsfg-dxbc/LICENSE.md') { rename { 'dxbc-license.txt' } }
         from('../emulator-core/src/main/cpp/third_party/sgsr/LICENSE') { rename { 'sgsr-BSD-3-Clause.txt' } }
+        from('../emulator-core/src/main/cpp/xenia/third_party/mbedtls/LICENSE') { rename { 'mbedtls-license.txt' } }
         from('../THIRD-PARTY-NOTICES.md') { rename { 'xendroid-notices.txt' } }
+        from('../LICENSE') { rename { 'xendroid-AGPL-3.0.txt' } }
     }
 }
 tasks.named('preBuild').configure { dependsOn(syncEngineLicenses) }

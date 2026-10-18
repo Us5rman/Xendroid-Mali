@@ -65,6 +65,10 @@ class GuestScheduler {
   // change. No-op if not queued.
   void RequeueForPriority(XThread* thread);
 
+  // Moves a ready thread to the CPU its guest affinity now names, which the
+  // dispatch loop only does once the old CPU dequeues it.
+  void MigrateForAffinity(XThread* thread);
+
   // Yields from a spin loop. On a fiber this hands the dispatch thread to the
   // next ready fiber, since a co-resident holder can only run if we yield.
   // Off the fiber path it yields (or briefly sleeps) the host thread.
@@ -111,6 +115,11 @@ class GuestScheduler {
 
   // Counts a safepoint preemption forced through a deferring IRQL.
   void NoteForcedPreempt();
+
+  // Opens a background-scheduling window on the background processors, as the
+  // console does from its vblank DPC. Those CPUs prefer the low priority band
+  // for its duration. Safe to call off a dispatch thread.
+  void EnterBackgroundMode();
 
   // Yields the running guest fiber back to its CPU's idle fiber. Returns (on
   // the calling fiber) once the dispatcher switches back into it.
@@ -225,6 +234,12 @@ class GuestScheduler {
     // Counts fiber dispatches on this CPU, so a yielder can tell whether
     // anything else ran before it resumed.
     std::atomic<uint64_t> switch_seq{0};
+    // Raw-tick end of an open background-scheduling window, 0 if none. While
+    // set, DequeueReady prefers the low priority band. Guarded by lock_.
+    uint64_t background_until_tick = 0;
+    // Earliest raw tick a new window may open, so the duty cycle stays put
+    // however often the vblank hook fires. Guarded by lock_.
+    uint64_t background_next_tick = 0;
     // Absolute host ms of the next forced full re-poll. Guarded by lock_.
     uint64_t next_force_repoll_ms = 0;
     // Absolute host ms of the next timed re-poll: the earliest gated
@@ -293,6 +308,10 @@ class GuestScheduler {
 
   // Preemption timeslice in raw host ticks, calibrated once in EnsureStarted.
   uint64_t quantum_ticks_ = 0;
+  // Length of a background-scheduling window, in raw host ticks.
+  uint64_t background_ticks_ = 0;
+  // Minimum spacing between windows, in raw host ticks.
+  uint64_t background_period_ticks_ = 0;
   std::unique_ptr<xe::threading::Thread> watchdog_thread_;
   std::unique_ptr<xe::threading::Event> watchdog_event_;
   // No-progress detection. The stall detector above only catches a CPU that
@@ -352,6 +371,8 @@ class GuestScheduler {
     std::atomic<uint64_t> idle_wakes{0};     // timed wakes of a parked CPU
     std::atomic<uint64_t> switches{0};       // fiber dispatches
     std::atomic<uint64_t> forced_preempts{0};  // IRQL defers escaped
+    std::atomic<uint64_t> background_windows{0};  // vblanks that opened one
+    std::atomic<uint64_t> background_picks{0};    // dispatches the mask steered
     std::atomic<uint64_t> io_calls{0};
     std::atomic<uint64_t> io_queue_ns{0};  // time queued before the worker ran
     std::atomic<uint64_t> io_run_ns{0};    // time inside the blocking call

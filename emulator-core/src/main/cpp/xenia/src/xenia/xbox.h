@@ -66,6 +66,7 @@ typedef uint32_t X_STATUS;
 #define X_STATUS_MUTANT_NOT_OWNED                       ((X_STATUS)0xC0000046L)
 #define X_STATUS_SEMAPHORE_LIMIT_EXCEEDED               ((X_STATUS)0xC0000047L)
 #define X_STATUS_THREAD_IS_TERMINATING                  ((X_STATUS)0xC000004BL)
+#define X_STATUS_DELETE_PENDING                         ((X_STATUS)0xC0000056L)
 #define X_STATUS_PROCEDURE_NOT_FOUND                    ((X_STATUS)0xC000007AL)
 #define X_STATUS_INVALID_IMAGE_FORMAT                   ((X_STATUS)0xC000007BL)
 #define X_STATUS_DISK_FULL                              ((X_STATUS)0xC000007FL)

@@ -8,6 +8,9 @@
  */
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
+
+#include <vector>
+
 #include "xenia/base/atomic.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/math.h"
@@ -403,6 +406,16 @@ dword_result_t KeQueryBasePriorityThread_entry(
   return priority;
 }
 DECLARE_XBOXKRNL_EXPORT1(KeQueryBasePriorityThread, kThreading, kImplemented);
+
+dword_result_t KeQueryBackgroundProcessors_entry() {
+  return kernel_state()->GetBackgroundProcessors();
+}
+DECLARE_XBOXKRNL_EXPORT1(KeQueryBackgroundProcessors, kThreading, kImplemented);
+
+void KeSetBackgroundProcessors_entry(dword_t value) {
+  kernel_state()->SetBackgroundProcessors(value);
+}
+DECLARE_XBOXKRNL_EXPORT1(KeSetBackgroundProcessors, kThreading, kImplemented);
 
 dword_result_t KeSetBasePriorityThread_entry(pointer_t<X_KTHREAD> thread_ptr,
                                              dword_t increment) {
@@ -1298,9 +1311,7 @@ uint32_t xeKeKfAcquireSpinLock(PPCContext* ctx, X_KSPINLOCK* lock,
           scheduler->DispatchCpuOf(our_cpu)) {
         volatile uint32_t* owner_raw = &lock->prcb_of_owner.value;
         for (int i = 0; i < kRemoteHolderSpinTries && *owner_raw; ++i) {
-#if XE_ARCH_AMD64 == 1
-          _mm_pause();
-#endif
+          SpinPause();
         }
         if (!*owner_raw) {
           continue;
@@ -1486,9 +1497,17 @@ uint32_t xeNtQueueApcThread(uint32_t thread_handle, uint32_t apc_routine,
   xeKeInitializeApc(apc, thread->guest_object(), XAPC::kDummyKernelRoutine, 0,
                     apc_routine, 1 /*user apc mode*/, apc_routine_context);
 
-  if (!xeKeInsertQueueApc(apc, arg1, arg2, 0, context)) {
+  if (!xeInsertQueueApcAndWake(thread.get(), apc, arg1, arg2, context)) {
     memory->SystemHeapFree(apc_ptr);
     return X_STATUS_UNSUCCESSFUL;
+  }
+  return X_STATUS_SUCCESS;
+}
+
+uint32_t xeInsertQueueApcAndWake(XThread* thread, XAPC* apc, uint32_t arg1,
+                                 uint32_t arg2, cpu::ppc::PPCContext* context) {
+  if (!xeKeInsertQueueApc(apc, arg1, arg2, 0, context)) {
+    return 0;
   }
   // Awaken a sleeping alertable thread to process real apcs. A host thread gets
   // a no-op user callback to break its wait, a fiber gets a scheduler poke so
@@ -1496,9 +1515,9 @@ uint32_t xeNtQueueApcThread(uint32_t thread_handle, uint32_t apc_routine,
   if (thread->thread()) {
     thread->thread()->QueueUserCallback([]() {});
   } else {
-    kernelstate->guest_scheduler()->WakeAll();
+    context->kernel_state->guest_scheduler()->WakeAll();
   }
-  return X_STATUS_SUCCESS;
+  return 1;
 }
 dword_result_t NtQueueApcThread_entry(dword_t thread_handle,
                                       lpvoid_t apc_routine,
@@ -1553,12 +1572,16 @@ static bool ProcessApcList(PPCContext* ctx, X_KTHREAD* current_thread,
     xe::store_and_swap<uint32_t>(scratch_ptr + 4, apc->normal_context);
     xe::store_and_swap<uint32_t>(scratch_ptr + 8, apc->arg1);
     xe::store_and_swap<uint32_t>(scratch_ptr + 12, apc->arg2);
+    // An owned APC can be freed by its owner as soon as the lock drops.
+    uint32_t kernel_routine = apc->kernel_routine;
     util::XeRemoveEntryList(&apc->list_entry, ctx);
     apc->enqueued = 0;
 
     xeKeKfReleaseSpinLock(ctx, &current_thread->apc_lock, unlocked_irql);
     processed_any = true;
-    if (apc->kernel_routine != XAPC::kDummyKernelRoutine) {
+    if (kernel_routine == XAPC::kDummyKernelRoutine) {
+      ctx->kernel_state->memory()->SystemHeapFree(apc_ptr);
+    } else if (kernel_routine != XAPC::kOwnedKernelRoutine) {
       uint64_t kernel_args[] = {
           apc_ptr,
           scratch_address + 0,
@@ -1566,10 +1589,8 @@ static bool ProcessApcList(PPCContext* ctx, X_KTHREAD* current_thread,
           scratch_address + 8,
           scratch_address + 12,
       };
-      ctx->processor->Execute(ctx->thread_state, apc->kernel_routine,
-                              kernel_args, xe::countof(kernel_args));
-    } else {
-      ctx->kernel_state->memory()->SystemHeapFree(apc_ptr);
+      ctx->processor->Execute(ctx->thread_state, kernel_routine, kernel_args,
+                              xe::countof(kernel_args));
     }
 
     uint32_t normal_routine = xe::load_and_swap<uint32_t>(scratch_ptr + 0);
@@ -1633,45 +1654,35 @@ static void YankApcList(PPCContext* ctx, X_KTHREAD* current_thread,
   uint32_t unlocked_irql =
       xeKeKfAcquireSpinLock(ctx, &current_thread->apc_lock);
 
-  XAPC* result = nullptr;
   auto& user_apc_queue = current_thread->apc_lists[apc_mode];
 
-  if (user_apc_queue.empty(ctx)) {
-    result = nullptr;
-  } else {
-    result = user_apc_queue.HeadObject(ctx);
+  // The APCs the rundown below touches, taken while the list is still locked.
+  // An APC owned by a timer (XAPC::kOwnedKernelRoutine) is only unlinked: once
+  // the lock is released its timer can free it or queue it again, on this
+  // thread or another, so neither it nor its links may be read afterwards.
+  std::vector<uint32_t> rundown_apcs;
+  if (!user_apc_queue.empty(ctx)) {
     for (auto&& entry : user_apc_queue.IterateForward(ctx)) {
       entry.enqueued = 0;
+      if (rundown && (entry.rundown_routine ||
+                      entry.kernel_routine != XAPC::kOwnedKernelRoutine)) {
+        rundown_apcs.push_back(ctx->HostToGuestVirtual(&entry));
+      }
     }
     util::XeRemoveEntryList(&user_apc_queue, ctx);
   }
 
   xeKeKfReleaseSpinLock(ctx, &current_thread->apc_lock, unlocked_irql);
 
-  if (rundown && result) {
-    XAPC* current_entry = result;
-    while (true) {
-      XAPC* this_entry = current_entry;
-      uint32_t next_entry = this_entry->list_entry.flink_ptr;
-
-      if (this_entry->rundown_routine) {
-        uint64_t args[] = {ctx->HostToGuestVirtual(this_entry)};
-        kernel_state()->processor()->Execute(ctx->thread_state,
-                                             this_entry->rundown_routine, args,
-                                             xe::countof(args));
-      } else {
-        ctx->kernel_state->memory()->SystemHeapFree(
-            ctx->HostToGuestVirtual(this_entry));
-      }
-
-      if (next_entry == 0) {
-        break;
-      }
-      current_entry = user_apc_queue.ListEntryObject(
-          ctx->TranslateVirtual<X_LIST_ENTRY*>(next_entry));
-      if (current_entry == result) {
-        break;
-      }
+  for (uint32_t apc_address : rundown_apcs) {
+    XAPC* this_entry = ctx->TranslateVirtual<XAPC*>(apc_address);
+    if (this_entry->rundown_routine) {
+      uint64_t args[] = {apc_address};
+      kernel_state()->processor()->Execute(ctx->thread_state,
+                                           this_entry->rundown_routine, args,
+                                           xe::countof(args));
+    } else {
+      ctx->kernel_state->memory()->SystemHeapFree(apc_address);
     }
   }
 }
@@ -1710,6 +1721,11 @@ void KeInitializeApc_entry(pointer_t<XAPC> apc, lpvoid_t thread_ptr,
 }
 DECLARE_XBOXKRNL_EXPORT1(KeInitializeApc, kThreading, kImplemented);
 
+// A host thread, such as an I/O worker or a timer callback, queues and removes
+// APCs with the target's context (see XThread::ApcQueueContext). It must leave
+// the target's IRQL alone, as the target may change it at the same time.
+static bool CallerIsHostThread() { return !cpu::ThreadState::Get(); }
+
 uint32_t xeKeInsertQueueApc(XAPC* apc, uint32_t arg1, uint32_t arg2,
                             uint32_t priority_increment,
                             cpu::ppc::PPCContext* context) {
@@ -1718,7 +1734,9 @@ uint32_t xeKeInsertQueueApc(XAPC* apc, uint32_t arg1, uint32_t arg2,
     return 0;
   }
   auto target_thread = context->TranslateVirtual<X_KTHREAD*>(apc->thread_ptr);
-  auto old_irql = xeKeKfAcquireSpinLock(context, &target_thread->apc_lock);
+  const bool change_irql = !CallerIsHostThread();
+  auto old_irql =
+      xeKeKfAcquireSpinLock(context, &target_thread->apc_lock, change_irql);
   uint32_t result;
   if (!target_thread->may_queue_apcs || apc->enqueued) {
     result = 0;
@@ -1754,7 +1772,8 @@ uint32_t xeKeInsertQueueApc(XAPC* apc, uint32_t arg1, uint32_t arg2,
     */
     result = 1;
   }
-  xeKeKfReleaseSpinLock(context, &target_thread->apc_lock, old_irql);
+  xeKeKfReleaseSpinLock(context, &target_thread->apc_lock, old_irql,
+                        change_irql);
   return result;
 }
 
@@ -1765,8 +1784,7 @@ dword_result_t KeInsertQueueApc_entry(pointer_t<XAPC> apc, lpvoid_t arg1,
 }
 DECLARE_XBOXKRNL_EXPORT1(KeInsertQueueApc, kThreading, kImplemented);
 
-dword_result_t KeRemoveQueueApc_entry(pointer_t<XAPC> apc,
-                                      const ppc_context_t& context) {
+uint32_t xeKeRemoveQueueApc(XAPC* apc, cpu::ppc::PPCContext* context) {
   bool result = false;
 
   uint32_t thread_guest_pointer = apc->thread_ptr;
@@ -1774,7 +1792,9 @@ dword_result_t KeRemoveQueueApc_entry(pointer_t<XAPC> apc,
     return 0;
   }
   auto target_thread = context->TranslateVirtual<X_KTHREAD*>(apc->thread_ptr);
-  auto old_irql = xeKeKfAcquireSpinLock(context, &target_thread->apc_lock);
+  const bool change_irql = !CallerIsHostThread();
+  auto old_irql =
+      xeKeKfAcquireSpinLock(context, &target_thread->apc_lock, change_irql);
 
   if (apc->enqueued) {
     result = true;
@@ -1782,9 +1802,15 @@ dword_result_t KeRemoveQueueApc_entry(pointer_t<XAPC> apc,
     util::XeRemoveEntryList(&apc->list_entry, context);
     // todo: this is incomplete, there is more logic here in actual kernel
   }
-  xeKeKfReleaseSpinLock(context, &target_thread->apc_lock, old_irql);
+  xeKeKfReleaseSpinLock(context, &target_thread->apc_lock, old_irql,
+                        change_irql);
 
   return result ? 1 : 0;
+}
+
+dword_result_t KeRemoveQueueApc_entry(pointer_t<XAPC> apc,
+                                      const ppc_context_t& context) {
+  return xeKeRemoveQueueApc(apc, context);
 }
 DECLARE_XBOXKRNL_EXPORT1(KeRemoveQueueApc, kThreading, kImplemented);
 

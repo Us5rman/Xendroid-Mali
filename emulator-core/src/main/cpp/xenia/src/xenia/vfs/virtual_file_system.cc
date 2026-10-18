@@ -32,25 +32,46 @@ VirtualFileSystem::~VirtualFileSystem() {
 
 void VirtualFileSystem::Clear() {
   devices_.clear();
+  retired_devices_.clear();
   symlinks_.clear();
 }
 
 bool VirtualFileSystem::RegisterDevice(std::unique_ptr<Device> device) {
   auto global_lock = global_critical_region_.Acquire();
+  ReleaseRetiredDevices();
   devices_.emplace_back(std::move(device));
   return true;
 }
 
 bool VirtualFileSystem::UnregisterDevice(const std::string_view path) {
   auto global_lock = global_critical_region_.Acquire();
+  ReleaseRetiredDevices();
   for (auto it = devices_.begin(); it != devices_.end(); ++it) {
     if ((*it)->mount_path() == path) {
       XELOGD("Unregistered device: {}", (*it)->mount_path());
+      // A handle the title still holds points at the device's entries, and
+      // closing it releases its entry (HostPathFile), so such a device stays
+      // alive, unmounted, until its handles are closed (XamSwapDisc of a game
+      // extracted to a folder, a profile or package closed under an open
+      // file).
+      auto root = (*it)->ResolvePath("");
+      if (root && root->has_open_files()) {
+        retired_devices_.push_back(std::move(*it));
+      }
       devices_.erase(it);
       return true;
     }
   }
   return false;
+}
+
+void VirtualFileSystem::ReleaseRetiredDevices() {
+  // Called under the global lock, which ReleaseFile holds too, so a device
+  // with no open handles has no close still running on its entries.
+  std::erase_if(retired_devices_, [](const auto& device) {
+    auto root = device->ResolvePath("");
+    return !root || !root->has_open_files();
+  });
 }
 
 Device* VirtualFileSystem::GetDevice(const std::string_view path) {
@@ -96,6 +117,7 @@ bool VirtualFileSystem::UnregisterSymbolicLink(const std::string_view path) {
 }
 
 bool VirtualFileSystem::IsSymbolicLinkRegistered(const std::string_view path) {
+  auto global_lock = global_critical_region_.Acquire();
   auto it = std::find_if(
       symlinks_.cbegin(), symlinks_.cend(),
       [&](const auto& s) { return xe::utf8::equal_case(path, s.first); });
@@ -105,6 +127,7 @@ bool VirtualFileSystem::IsSymbolicLinkRegistered(const std::string_view path) {
 
 bool VirtualFileSystem::FindSymbolicLink(const std::string_view path,
                                          std::string& target) {
+  auto global_lock = global_critical_region_.Acquire();
   auto it = std::find_if(
       symlinks_.cbegin(), symlinks_.cend(),
       [&](const auto& s) { return xe::utf8::starts_with_case(path, s.first); });
@@ -142,11 +165,18 @@ namespace {
 // mounted at ...\Content also swallows ...\Content_Eng.
 bool MountPathMatches(const std::string_view path,
                       const std::string_view mount_path) {
-  if (mount_path.empty() || !xe::utf8::starts_with_case(path, mount_path)) {
+  if (mount_path.empty()) {
+    return false;
+  }
+  const char last = mount_path.back();
+  // Links name a \Device\Content\N\ root without the trailing separator.
+  if (last == '\\' && path.size() + 1 == mount_path.size()) {
+    return xe::utf8::equal_case(path, mount_path.substr(0, path.size()));
+  }
+  if (!xe::utf8::starts_with_case(path, mount_path)) {
     return false;
   }
   // Mounts ending in a delimiter already sit on a component boundary.
-  const char last = mount_path.back();
   if (last == '\\' || last == ':') {
     return true;
   }
@@ -186,37 +216,50 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
     return nullptr;
   }
 
-  auto relative_path = normalized_path.substr(device->mount_path().size());
+  auto relative_path = normalized_path.substr(
+      std::min(normalized_path.size(), device->mount_path().size()));
   return device->ResolvePath(relative_path);
 }
 
 Entry* VirtualFileSystem::CreatePath(const std::string_view path,
                                      uint32_t attributes) {
-  // Create all required directories recursively.
   auto path_parts = xe::utf8::split_path(path);
   if (path_parts.empty()) {
     return nullptr;
   }
-  auto partial_path = std::string(path_parts[0]);
-  auto partial_entry = ResolvePath(partial_path);
-  if (!partial_entry) {
+
+  // A device mount spans several path components, not just the first.
+  Entry* parent_entry = nullptr;
+  size_t next_part = path_parts.size();
+  while (next_part > 0) {
+    const auto& part = path_parts[next_part - 1];
+    const size_t prefix_length =
+        static_cast<size_t>(part.data() + part.size() - path.data());
+    parent_entry = ResolvePath(path.substr(0, prefix_length));
+    if (parent_entry) {
+      break;
+    }
+    --next_part;
+  }
+  if (!parent_entry) {
     return nullptr;
   }
-  auto parent_entry = partial_entry;
-  for (size_t i = 1; i < path_parts.size() - 1; ++i) {
-    partial_path = xe::utf8::join_guest_paths(partial_path, path_parts[i]);
-    auto child_entry = ResolvePath(partial_path);
-    if (!child_entry) {
-      child_entry =
-          parent_entry->CreateEntry(path_parts[i], kFileAttributeDirectory);
+
+  for (size_t i = next_part; i < path_parts.size(); ++i) {
+    // Nothing goes beneath a file (a content package collapsed to its one
+    // payload file resolves as a file).
+    if (!(parent_entry->attributes() & kFileAttributeDirectory)) {
+      return nullptr;
     }
+    const bool is_last = i == path_parts.size() - 1;
+    auto child_entry = parent_entry->CreateEntry(
+        path_parts[i], is_last ? attributes : kFileAttributeDirectory);
     if (!child_entry) {
       return nullptr;
     }
     parent_entry = child_entry;
   }
-  return parent_entry->CreateEntry(path_parts[path_parts.size() - 1],
-                                   attributes);
+  return parent_entry;
 }
 
 bool VirtualFileSystem::DeletePath(const std::string_view path) {
@@ -240,6 +283,9 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
                                      FileAction* out_action) {
   // TODO(gibbed): should 'is_directory' remain as a bool or should it be
   // flipped to a generic FileAttributeFlags?
+
+  // Early failures leave it as it is, and NtCreateFile passes it to the guest.
+  *out_action = FileAction::kDoesNotExist;
 
   // Cleanup access.
   if (desired_access & FileAccess::kGenericRead) {
@@ -268,6 +314,16 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
 
     auto file_name = xe::utf8::find_name_from_guest_path(path);
     entry = parent_entry->GetChild(file_name);
+  } else if (path.empty() && root_entry) {
+    // An empty relative path is the root entry itself. Replacing it would
+    // delete what the root handle still refers to.
+    if (creation_disposition == FileDisposition::kSuperscede ||
+        creation_disposition == FileDisposition::kOverwrite ||
+        creation_disposition == FileDisposition::kOverwriteIf) {
+      *out_action = FileAction::kDoesNotExist;
+      return X_STATUS_ACCESS_DENIED;
+    }
+    entry = root_entry;
   } else {
     entry = !root_entry ? ResolvePath(path) : root_entry->GetChild(path);
   }
@@ -296,6 +352,15 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
         }
       }
     }
+  }
+
+  // Its deletion waits for the last handle to close (see
+  // HostPathEntry::ReleaseFile). NT refuses to open it until then, and an
+  // overwrite here would write contents that the last close deletes. Entries
+  // that count no handles (packages, discs) never carry the mark out, so it
+  // only counts while handles are open.
+  if (entry && entry->delete_on_close() && entry->has_open_files()) {
+    return X_STATUS_DELETE_PENDING;
   }
 
   // Check if exists (if we need it to), or that it doesn't (if it shouldn't).
@@ -334,6 +399,7 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
   }
 
   bool created = false;
+  bool truncate_in_place = false;
   if (!entry) {
     // Remember that we are creating this new, instead of replacing.
     created = true;
@@ -346,26 +412,34 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
         assert_always();
         return X_STATUS_ACCESS_DENIED;
       case FileDisposition::kSuperscede:
+      case FileDisposition::kOverwrite:
+      case FileDisposition::kOverwriteIf:
+        if (entry->attributes() & kFileAttributeDirectory) {
+          // FAT only opens an existing directory. Replacing it deleted the
+          // whole tree (or, with handles open, truncated a directory fd).
+          *out_action = FileAction::kExists;
+          return X_STATUS_OBJECT_NAME_COLLISION;
+        }
+        *out_action = creation_disposition == FileDisposition::kSuperscede
+                          ? FileAction::kSuperseded
+                          : FileAction::kOverwritten;
+        if (entry->has_open_files()) {
+          // Other handles keep it open, so it can't be deleted and recreated
+          // under them (their entry would be freed). NT truncates it in place
+          // instead, and the other handles see the new contents.
+          truncate_in_place = true;
+          break;
+        }
         // Replace (by delete + recreate).
         if (!entry->Delete()) {
           return X_STATUS_ACCESS_DENIED;
         }
         entry = nullptr;
-        *out_action = FileAction::kSuperseded;
         break;
       case FileDisposition::kOpen:
       case FileDisposition::kOpenIf:
         // Normal open.
         *out_action = FileAction::kOpened;
-        break;
-      case FileDisposition::kOverwrite:
-      case FileDisposition::kOverwriteIf:
-        // Overwrite (we do by delete + recreate).
-        if (!entry->Delete()) {
-          return X_STATUS_ACCESS_DENIED;
-        }
-        entry = nullptr;
-        *out_action = FileAction::kOverwritten;
         break;
     }
   }
@@ -382,6 +456,15 @@ X_STATUS VirtualFileSystem::OpenFile(Entry* root_entry,
   auto result = entry->Open(desired_access, out_file);
   if (XFAILED(result)) {
     *out_action = FileAction::kDoesNotExist;
+  } else if (truncate_in_place) {
+    result = (*out_file)->SetLength(0);
+    if (XFAILED(result)) {
+      (*out_file)->Destroy();
+      *out_file = nullptr;
+      *out_action = FileAction::kDoesNotExist;
+    } else {
+      entry->update();
+    }
   }
   return result;
 }

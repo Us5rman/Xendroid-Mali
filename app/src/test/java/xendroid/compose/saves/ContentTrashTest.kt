@@ -55,6 +55,18 @@ class ContentTrashTest {
         assertEquals(emptyList<TrashedContent>(), trash().list())
     }
 
+    @Test fun aPackageKeptAsOneFileGoesToTheTrashAndBack() {
+        // A title can install a package by copying the package file itself; it has no header.
+        val file = data(dlc, "RawPack").apply { parentFile!!.mkdirs(); writeBytes(ByteArray(300) { 3 }) }
+        val entry = leased { trash().moveToTrash(it, title, dlc, "RawPack", "Raw Pack") }
+        assertFalse(file.exists())
+        assertEquals(300L, entry.bytes)
+        leased { trash().restore(it, entry.id) }
+        assertTrue(file.isFile)
+        assertEquals(300L, file.length())
+        assertEquals(emptyList<TrashedContent>(), trash().list())
+    }
+
     @Test fun restoreNeverReplacesAPackageInstalledAgain() {
         install(tu, "TU5")
         val entry = leased { trash().moveToTrash(it, title, tu, "TU5", "Title Update 5") }

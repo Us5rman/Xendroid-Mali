@@ -26,7 +26,7 @@ namespace xam {
 void AddODDContentTest(object_ref<XStaticEnumerator<XCONTENT_AGGREGATE_DATA>> e,
                        XContentType content_type) {
   auto root_entry = kernel_state()->file_system()->ResolvePath(
-      "GAME:\\Content\\0000000000000000");
+      kernel_state()->title_mount_path_ + "\\Content\\0000000000000000");
   if (!root_entry) {
     return;
   }

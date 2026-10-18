@@ -395,6 +395,9 @@ typedef struct alignas(64) PPCContext_s {
   // These are split to make it easier to do DCE on unused stores.
   uint64_t cr() const;
   void set_cr(uint64_t value);
+  // Only CA, OV and SO are modelled, the rest read as zero.
+  uint32_t xer() const;
+  void set_xer(uint32_t value);
   // todo: remove, saturation should be represented by a vector
   uint8_t vscr_sat;
 
@@ -452,8 +455,8 @@ typedef struct alignas(64) PPCContext_s {
     }
 #else
     // Match vE0000000 PhysicalHeap shift (see Memory::TranslateVirtual).
-    if (xe::memory::allocation_granularity() > 0x1000 &&
-        guest_address >= 0xE0000000u) {
+    if (guest_address >= 0xE0000000u &&
+        xe::memory::allocation_granularity() > 0x1000) {
       host_address += 0x1000;
     }
 #endif

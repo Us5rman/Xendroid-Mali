@@ -66,9 +66,12 @@ class VirtualFileSystem {
  private:
   xe::global_critical_region global_critical_region_;
   std::vector<std::unique_ptr<Device>> devices_;
+  // Unregistered devices that open handles still point into.
+  std::vector<std::unique_ptr<Device>> retired_devices_;
   std::unordered_map<std::string, std::string> symlinks_;
 
   bool ResolveSymbolicLink(const std::string_view path, std::string& result);
+  void ReleaseRetiredDevices();
 };
 
 }  // namespace vfs

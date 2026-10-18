@@ -13,7 +13,12 @@
 // no inheritance or virtual dispatch. The include site must already provide
 // SharedMemory, Shader, RegisterFile, xenos, xe::bit_scan_forward and <array>.
 // No include guard: this is injected into a class body, not a standalone
-// header.
+// header. It must also provide
+//   uint64_t GetCurrentSubmission()
+//   bool AwaitMemexportSubmission(uint64_t submission)
+//     Waits for a submission to complete, ending it first if it is the one
+//     still being recorded. Returns whether it has completed (not with the
+//     device lost).
 
 // Records the guest pages any memexport draw wrote so geometry draws consuming
 // that output route to the host-imported buffer. Marking rounds outward.
@@ -29,6 +34,7 @@ void MarkMemexportPagesWritten(uint32_t base_bytes, uint32_t size_bytes) {
   }
   any_memexport_pages_written_ = true;
   memexport_await_pending_ = true;
+  memexport_last_submission_ = GetCurrentSubmission();
   memexport_written_page_min_ =
       std::min(memexport_written_page_min_, first_page);
   memexport_written_page_max_ =
@@ -47,10 +53,11 @@ void AwaitMemexportForFence(const char* reason) {
     return;
   }
   memexport_await_pending_ = false;
-  // Flushes the open submission before waiting, so a draw that is still only
-  // recorded gets submitted rather than skipped.
+  // Only as far as the last export, which is submitted first if it is still
+  // only recorded: its submission ends with what makes the output visible, and
+  // the readbacks of all exports are applied once it completes.
   memexport_await_reason_ = reason;
-  AwaitAllQueueOperationsCompletion();
+  AwaitMemexportSubmission(memexport_last_submission_);
   memexport_await_reason_ = nullptr;
 }
 
@@ -74,7 +81,7 @@ void AwaitMemexportForCoherency(uint32_t base_bytes, uint32_t size_bytes) {
         "0123456789ABCDEF"[(size_bytes >> (28 - 4 * i)) & 0xF];
   }
   memexport_await_reason_ = coherency_reason;
-  AwaitAllQueueOperationsCompletion();
+  AwaitMemexportSubmission(memexport_last_submission_);
   memexport_await_reason_ = nullptr;
 }
 
@@ -91,7 +98,7 @@ bool AwaitMemexportReadbacks(const char* reason) {
   }
   memexport_await_pending_ = false;
   memexport_await_reason_ = reason;
-  const bool awaited = AwaitAllQueueOperationsCompletion();
+  const bool awaited = AwaitMemexportSubmission(memexport_last_submission_);
   memexport_await_reason_ = nullptr;
   return awaited && !memexport_readbacks_pending_;
 }
@@ -151,7 +158,8 @@ bool VertexFetchInMemexportRange(const RegisterFile& regs,
       if (vfetch_constant.type != xenos::FetchConstantType::kVertex) {
         continue;
       }
-      if (IsMemexportRange(vfetch_constant.address << 2,
+      // Physical, like the vertex buffer the draw binds (mirror windows).
+      if (IsMemexportRange(xenos::CpuToGpu(vfetch_constant.address << 2),
                            vfetch_constant.size << 2)) {
         return true;
       }
@@ -166,6 +174,7 @@ void ResetMemexportPages() {
   any_memexport_pages_written_ = false;
   memexport_await_pending_ = false;
   memexport_readbacks_pending_ = false;
+  memexport_last_submission_ = 0;
   memexport_written_page_min_ = kMemexportPageCount;
   memexport_written_page_max_ = 0;
 }
@@ -182,6 +191,8 @@ bool memexport_await_pending_ = false;
 // of it complete (Vulkan's memexport_readback_deferred) is still pending,
 // wherever it went.
 bool memexport_readbacks_pending_ = false;
+// Submission the last export draw was recorded in, which the waits above await.
+uint64_t memexport_last_submission_ = 0;
 // What the GPU is being awaited for above, while it is (for the backend's
 // debug.xendroid.memexport_log).
 const char* memexport_await_reason_ = nullptr;

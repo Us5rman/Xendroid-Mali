@@ -85,6 +85,8 @@ struct XAPC {
   static constexpr uint32_t kSize = 40;
   static constexpr uint32_t kDummyKernelRoutine = 0xF00DFF00;
   static constexpr uint32_t kDummyRundownRoutine = 0xF00DFF01;
+  // Kernel routine of an APC its owner frees, skipped on delivery.
+  static constexpr uint32_t kOwnedKernelRoutine = 0xF00DFF02;
 
   // KAPC is 0x28(40) bytes? (what's passed to ExAllocatePoolWithTag)
   // This is 4b shorter than NT - looks like the reserved dword at +4 is gone.
@@ -430,6 +432,9 @@ class XThread : public XObject, public cpu::Thread {
 
   void EnqueueApc(uint32_t normal_routine, uint32_t normal_context,
                   uint32_t arg1, uint32_t arg2);
+  // Queues an owned APC initialized for this thread, unless already queued.
+  bool InsertOwnedApc(uint32_t apc_ptr, uint32_t arg1, uint32_t arg2);
+  void RemoveOwnedApc(uint32_t apc_ptr);
 
   // True if this thread has a user-mode APC queued (or pending). Used by the
   // cooperative scheduler's alertable waits to return USER_APC, the same way a
@@ -567,9 +572,17 @@ class XThread : public XObject, public cpu::Thread {
     bool blocked = false;    // parked in the blocked (waiting) list
     bool suspended = false;  // parked with a nonzero suspend count
     bool running = false;    // executing on a dispatch thread
-    bool preempted = false;  // slice cut short by a higher-priority thread
-    bool has_run = false;    // diagnostic: dispatched at least once
-    bool forced_preempt_logged = false;  // one forced-preempt warning per thread
+    // Slice cut short by a ready higher-priority thread that took the CPU,
+    // matching X_KTHREAD::was_preempted. Not set speculatively - see
+    // repoll_preempt.
+    bool preempted = false;
+    // Bumped to a safepoint so its CPU can re-poll for a blocked waiter that
+    // outranks it. That waiter may not wake, so nothing has displaced this
+    // thread and no quantum is charged.
+    bool repoll_preempt = false;
+    bool has_run = false;  // diagnostic: dispatched at least once
+    bool forced_preempt_logged =
+        false;  // one forced-preempt warning per thread
     // Set by an external Terminate, exits the fiber at its next
     // ExitIfTerminated check.
     std::atomic<bool> terminate_pending{false};
@@ -634,6 +647,7 @@ class XThread : public XObject, public cpu::Thread {
 
   void DeliverAPCs();
   void RundownAPCs();
+  cpu::ppc::PPCContext* ApcQueueContext();
 
   // Publishes a new effective priority to the guest KTHREAD field, the host
   // thread and the scheduler's ready queue. Every change goes through here.

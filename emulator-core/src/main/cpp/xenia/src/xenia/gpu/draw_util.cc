@@ -489,21 +489,31 @@ void GetHostViewportInfo(GetViewportInfoArgs* XE_RESTRICT args,
       // With resolution scaling, do all viewport XY scissoring in guest pixels
       // if fractional and for the half-pixel offset - we treat guest pixels as
       // a whole, and also the half-pixel offset would be irreversible in guest
-      // vertices if we did flooring in host pixels. Instead of flooring, also
-      // doing truncation for simplicity - since maxing with 0 is done anyway
-      // (we only return viewports in the positive quarter-plane).
+      // vertices if we did flooring in host pixels.
+      //
+      // The start may be negative, down to -max, instead of being cropped at
+      // 0. With a window offset (predicated tiling in 4D5307DF draws its
+      // right-hand tile at x -608) cropping gave the tiles different NDC
+      // scales and offsets, and in some frames the same geometry came out as
+      // a flat wedge or rectangle in one tile only. Vulkan guarantees that
+      // viewportBoundsRange covers -2 * maxViewportDimensions, and Direct3D 12
+      // allows -32768. The extent still stays within max.
       uint32_t axis_resolution_scale =
           i ? args->draw_resolution_scale_y : args->draw_resolution_scale_x;
       float offset_axis = offset_base_xy[i] + offset_add_xy[i];
       float scale_axis = scale_xy[i];
       float scale_axis_abs = std::abs(scale_xy[i]);
       float axis_max_unscaled_float = float(xy_max_unscaled[i]);
-      uint32_t axis_0_int = uint32_t(xe::clamp_float(
-          offset_axis - scale_axis_abs, 0.0f, axis_max_unscaled_float));
-      uint32_t axis_1_int = uint32_t(xe::clamp_float(
-          offset_axis + scale_axis_abs, 0.0f, axis_max_unscaled_float));
-      uint32_t axis_extent_int = axis_1_int - axis_0_int;
-      viewport_info_out.xy_offset[i] = axis_0_int * axis_resolution_scale;
+      int32_t axis_1_int = int32_t(std::floor(xe::clamp_float(
+          offset_axis + scale_axis_abs, 0.0f, axis_max_unscaled_float)));
+      int32_t axis_0_int = int32_t(std::floor(
+          xe::clamp_float(offset_axis - scale_axis_abs,
+                          float(axis_1_int) - axis_max_unscaled_float,
+                          axis_max_unscaled_float)));
+      uint32_t axis_extent_int =
+          axis_1_int > 0 ? uint32_t(axis_1_int - axis_0_int) : 0;
+      viewport_info_out.xy_offset[i] =
+          axis_0_int * int32_t(axis_resolution_scale);
       viewport_info_out.xy_extent[i] = axis_extent_int * axis_resolution_scale;
       float ndc_scale_axis;
       float ndc_offset_axis;
@@ -921,12 +931,15 @@ void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
     }
     uint32_t stream_size_bytes =
         stream.index_count * (format_info.bits_per_pixel >> 3);
+    // Mask to physical like the shader - the guest may use a mirror window.
+    uint32_t stream_base_address_dwords =
+        xenos::CpuToGpu(uint32_t(stream.base_address) << 2) >> 2;
     // Try to reduce the number of shared memory operations when writing
     // different elements into the same buffer through different exports
     // (happens in 4D5307E6).
     bool range_reused = false;
     for (MemExportRange& range : ranges_out) {
-      if (range.base_address_dwords == stream.base_address) {
+      if (range.base_address_dwords == stream_base_address_dwords) {
         range.size_bytes = std::max(range.size_bytes, stream_size_bytes);
         range_reused = true;
         break;
@@ -934,7 +947,7 @@ void AddMemExportRanges(const RegisterFile& regs, const Shader& shader,
     }
     // Add a new range if haven't expanded an existing one.
     if (!range_reused) {
-      ranges_out.emplace_back(uint32_t(stream.base_address), stream_size_bytes);
+      ranges_out.emplace_back(stream_base_address_dwords, stream_size_bytes);
     }
   }
 }
@@ -1125,8 +1138,8 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
   // rectangle internally to 8. While all the alignment should have already been
   // done by Direct3D 9, just for safety of host implementation of resolve,
   // force-align the rectangle by expanding (D3D9 expands to the right/bottom
-  // for some reason, haven't found how left/top is rounded, but logically it
-  // would make sense to expand to the left/top too).
+  // for some reason and takes the left/top as given, only requiring them to be
+  // aligned, but logically it would make sense to expand to the left/top too).
   x0 &= ~int32_t(xenos::kResolveAlignmentPixels - 1);
   y0 &= ~int32_t(xenos::kResolveAlignmentPixels - 1);
   x1 = xe::align(x1, int32_t(xenos::kResolveAlignmentPixels));
@@ -1247,9 +1260,20 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
                 texture_address::kStoragePitchHeightAlignmentBlocks);
   info_out.copy_dest_coordinate_info.pitch_aligned_div_32 =
       copy_dest_pitch_aligned >> 5;
-  const uint32_t copy_dest_height_aligned =
-      xe::align(rb_copy_dest_pitch.copy_dest_height,
-                texture_address::kStoragePitchHeightAlignmentBlocks);
+  // For volume resolves.
+  // D3D writes pitch * level height in blocks to RB_COPY_SURFACE_SLICE.
+  // Only use copy_dest_height, which instead includes the top of a source
+  // rectangle, as a fallback.
+  uint32_t copy_dest_height = rb_copy_dest_pitch.copy_dest_height;
+  if (rb_copy_dest_info.copy_dest_array) {
+    uint32_t rb_copy_surface_slice = regs[XE_GPU_REG_RB_COPY_SURFACE_SLICE];
+    if (rb_copy_surface_slice && rb_copy_dest_pitch.copy_dest_pitch) {
+      copy_dest_height =
+          rb_copy_surface_slice / rb_copy_dest_pitch.copy_dest_pitch;
+    }
+  }
+  const uint32_t copy_dest_height_aligned = xe::align(
+      copy_dest_height, texture_address::kStoragePitchHeightAlignmentBlocks);
   info_out.copy_dest_coordinate_info.height_aligned_div_32 =
       copy_dest_height_aligned >> 5;
   const FormatInfo& dest_format_info = *FormatInfo::Get(dest_format);
@@ -1263,14 +1287,36 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
         (UINT32_C(1) << xenos::GetTextureTiledYBaseGranularityLog2(
              bool(rb_copy_dest_info.copy_dest_array), bpp_log2)) -
         1;
+    // D3D advances RB_COPY_DEST_BASE in 32x32 macro tiles based on the
+    // destination point. 8bpp/16bpp macro tiles are smaller than 4KB,
+    // so part of the x offset can be left in the base's low bits.
+    // So this moves that part back into dest_addr_x0 before doing the usual
+    // tiled calculation. 534307D5's water refraction texture's middle 5_6_5
+    // strip hits this at x=480.
+    uint32_t dest_addr_base = rb_copy_dest_base;
+    uint32_t dest_addr_x0 = uint32_t(x0);
+    uint32_t dest_addr_y0 = uint32_t(y0);
+    if (!rb_copy_dest_info.copy_dest_array) {
+      uint32_t dest_macro_tile_bytes_log2 =
+          2 * xenos::kTextureTileWidthHeightLog2 + bpp_log2;
+      uint32_t dest_macro_phase =
+          (rb_copy_dest_base &
+           (xenos::kTextureSubresourceAlignmentBytes - 1)) >>
+          dest_macro_tile_bytes_log2;
+      dest_addr_base -= dest_macro_phase << dest_macro_tile_bytes_log2;
+      dest_addr_x0 += dest_macro_phase << xenos::kTextureTileWidthHeightLog2;
+    }
+    uint32_t dest_addr_x1 = dest_addr_x0 + uint32_t(x1 - x0);
+    uint32_t dest_addr_y1 = dest_addr_y0 + uint32_t(y1 - y0);
+    copy_dest_base_adjusted = dest_addr_base;
     info_out.copy_dest_coordinate_info.offset_x_div_8 =
-        (uint32_t(x0) & dest_base_relative_x_mask) >>
+        (dest_addr_x0 & dest_base_relative_x_mask) >>
         xenos::kResolveAlignmentPixelsLog2;
     info_out.copy_dest_coordinate_info.offset_y_div_8 =
-        (uint32_t(y0) & dest_base_relative_y_mask) >>
+        (dest_addr_y0 & dest_base_relative_y_mask) >>
         xenos::kResolveAlignmentPixelsLog2;
-    uint32_t dest_base_x = uint32_t(x0) & ~dest_base_relative_x_mask;
-    uint32_t dest_base_y = uint32_t(y0) & ~dest_base_relative_y_mask;
+    uint32_t dest_base_x = dest_addr_x0 & ~dest_base_relative_x_mask;
+    uint32_t dest_base_y = dest_addr_y0 & ~dest_base_relative_y_mask;
     if (rb_copy_dest_info.copy_dest_array) {
       // The base pointer is already adjusted to the Z / 8 (copy_dest_slice is
       // 3-bit).
@@ -1278,27 +1324,27 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
           int32_t(dest_base_x), int32_t(dest_base_y), 0,
           copy_dest_pitch_aligned, copy_dest_height_aligned, bpp_log2));
       copy_dest_extent_start =
-          rb_copy_dest_base +
+          dest_addr_base +
           uint32_t(texture_util::GetTiledAddressLowerBound3D(
-              uint32_t(x0), uint32_t(y0), rb_copy_dest_info.copy_dest_slice,
+              dest_addr_x0, dest_addr_y0, rb_copy_dest_info.copy_dest_slice,
               copy_dest_pitch_aligned, copy_dest_height_aligned, bpp_log2));
       copy_dest_extent_end =
-          rb_copy_dest_base +
+          dest_addr_base +
           uint32_t(texture_util::GetTiledAddressUpperBound3D(
-              uint32_t(x1), uint32_t(y1), rb_copy_dest_info.copy_dest_slice + 1,
+              dest_addr_x1, dest_addr_y1, rb_copy_dest_info.copy_dest_slice + 1,
               copy_dest_pitch_aligned, copy_dest_height_aligned, bpp_log2));
     } else {
       copy_dest_base_adjusted +=
           texture_address::Tiled2D(int32_t(dest_base_x), int32_t(dest_base_y),
                                    copy_dest_pitch_aligned, bpp_log2);
       copy_dest_extent_start =
-          rb_copy_dest_base +
+          dest_addr_base +
           texture_util::GetTiledAddressLowerBound2D(
-              uint32_t(x0), uint32_t(y0), copy_dest_pitch_aligned, bpp_log2);
+              dest_addr_x0, dest_addr_y0, copy_dest_pitch_aligned, bpp_log2);
       copy_dest_extent_end =
-          rb_copy_dest_base +
+          dest_addr_base +
           texture_util::GetTiledAddressUpperBound2D(
-              uint32_t(x1), uint32_t(y1), copy_dest_pitch_aligned, bpp_log2);
+              dest_addr_x1, dest_addr_y1, copy_dest_pitch_aligned, bpp_log2);
     }
   } else {
     XELOGE("Tried to resolve to format {}, which is not a ColorFormat",

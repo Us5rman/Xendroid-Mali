@@ -560,23 +560,25 @@ int InstrEmit_vcfpuxws128(PPCHIRBuilder& f, const InstrData& i) {
 
 int InstrEmit_vcmpbfp_(PPCHIRBuilder& f, const InstrData& i, uint32_t vd,
                        uint32_t va, uint32_t vb, uint32_t rc) {
-  // if vA or vB are NaN, the 2 high-order bits are set (0xC0000000)
   Value* va_value = f.LoadVR(va);
   Value* vb_value = f.LoadVR(vb);
   Value* gt = f.VectorCompareSGT(va_value, vb_value, FLOAT32_TYPE);
-  Value* lt =
-      f.Not(f.VectorCompareSGE(va_value, f.Neg(vb_value), FLOAT32_TYPE));
-  Value* v =
-      f.Or(f.And(gt, f.LoadConstantVec128(vec128i(0x80000000, 0x80000000,
-                                                  0x80000000, 0x80000000))),
-           f.And(lt, f.LoadConstantVec128(vec128i(0x40000000, 0x40000000,
-                                                  0x40000000, 0x40000000))));
+  Value* lt = f.VectorCompareSGT(f.Neg(vb_value), va_value, FLOAT32_TYPE);
+  // A NaN in either operand is out of bounds both ways, so both bits are set.
+  Value* nan =
+      f.Not(f.And(f.VectorCompareEQ(va_value, va_value, FLOAT32_TYPE),
+                  f.VectorCompareEQ(vb_value, vb_value, FLOAT32_TYPE)));
+  Value* v = f.Or(f.And(f.Or(gt, nan),
+                        f.LoadConstantVec128(vec128i(0x80000000, 0x80000000,
+                                                     0x80000000, 0x80000000))),
+                  f.And(f.Or(lt, nan),
+                        f.LoadConstantVec128(vec128i(0x40000000, 0x40000000,
+                                                     0x40000000, 0x40000000))));
   f.StoreVR(vd, v);
   if (rc) {
-    // CR0:4 = 0; CR0:5 = VT == 0; CR0:6 = CR0:7 = 0;
-    // If all of the elements are within bounds, CR6[2] is set
-    // FIXME: Does not affect CR6[0], but the following function does.
-    f.UpdateCR6(f.Or(gt, lt));
+    // CR6[2] is set when every element was in bounds, and vcmpbfp writes no
+    // other bit. Testing the result rather than the mask keeps CR6[0] clear.
+    f.UpdateCR6(v);
   }
   return 0;
 }
@@ -1546,8 +1548,20 @@ int InstrEmit_vsldoi_(PPCHIRBuilder& f, uint32_t vd, uint32_t va, uint32_t vb,
   // vsldoi128 vr63,vr63,vr63,4
   // (ABCD ABCD) << 4b = (BCDA)
   // (VA << SH) OR (VB >> (16 - SH))
-  Value* control = f.LoadConstantVec128(__vsldoi_table[sh]);
-  Value* v = f.Permute(control, f.LoadVR(va), f.LoadVR(vb), INT8_TYPE);
+  Value* v;
+  if (!(sh & 3)) {
+    // Word aligned, so a word permute does it. Source word sh/4 + i encodes as
+    // is: lane in bits 0-1, vb select in bit 2.
+    uint32_t control = 0;
+    for (uint32_t i = 0; i < 4; ++i) {
+      control |= ((sh >> 2) + i) << (i * 8);
+    }
+    v = f.Permute(f.LoadConstantUint32(control), f.LoadVR(va), f.LoadVR(vb),
+                  INT32_TYPE);
+  } else {
+    Value* control = f.LoadConstantVec128(__vsldoi_table[sh]);
+    v = f.Permute(control, f.LoadVR(va), f.LoadVR(vb), INT8_TYPE);
+  }
   f.StoreVR(vd, v);
   return 0;
 }
@@ -2147,7 +2161,6 @@ int InstrEmit_vupkhsh(PPCHIRBuilder& f, const InstrData& i) {
   return InstrEmit_vupkhsh_(f, i.VX.VD, i.VX.VB);
 }
 int InstrEmit_vupkhsh128(PPCHIRBuilder& f, const InstrData& i) {
-  assert_zero(VX128_VA128);
   return InstrEmit_vupkhsh_(f, VX128_VD128, VX128_VB128);
 }
 
@@ -2164,7 +2177,6 @@ int InstrEmit_vupklsh(PPCHIRBuilder& f, const InstrData& i) {
   return InstrEmit_vupklsh_(f, i.VX.VD, i.VX.VB);
 }
 int InstrEmit_vupklsh128(PPCHIRBuilder& f, const InstrData& i) {
-  assert_zero(VX128_VA128);
   return InstrEmit_vupklsh_(f, VX128_VD128, VX128_VB128);
 }
 
@@ -2181,11 +2193,6 @@ int InstrEmit_vupkhsb(PPCHIRBuilder& f, const InstrData& i) {
   return InstrEmit_vupkhsb_(f, i.VX.VD, i.VX.VB);
 }
 int InstrEmit_vupkhsb128(PPCHIRBuilder& f, const InstrData& i) {
-  uint32_t va = VX128_VA128;
-  if (va == 0x60) {
-    // Hrm, my instruction tables suck.
-    return InstrEmit_vupkhsh_(f, VX128_VD128, VX128_VB128);
-  }
   return InstrEmit_vupkhsb_(f, VX128_VD128, VX128_VB128);
 }
 
@@ -2202,11 +2209,6 @@ int InstrEmit_vupklsb(PPCHIRBuilder& f, const InstrData& i) {
   return InstrEmit_vupklsb_(f, i.VX.VD, i.VX.VB);
 }
 int InstrEmit_vupklsb128(PPCHIRBuilder& f, const InstrData& i) {
-  uint32_t va = VX128_VA128;
-  if (va == 0x60) {
-    // Hrm, my instruction tables suck.
-    return InstrEmit_vupklsh_(f, VX128_VD128, VX128_VB128);
-  }
   return InstrEmit_vupklsb_(f, VX128_VD128, VX128_VB128);
 }
 
@@ -2609,10 +2611,12 @@ void RegisterEmitCategoryAltivec() {
   XEREGISTERINSTR(vupkhsb);
   XEREGISTERINSTR(vupkhsb128);
   XEREGISTERINSTR(vupkhsh);
+  XEREGISTERINSTR(vupkhsh128);
   XEREGISTERINSTR(vupklpx);
   XEREGISTERINSTR(vupklsb);
   XEREGISTERINSTR(vupklsb128);
   XEREGISTERINSTR(vupklsh);
+  XEREGISTERINSTR(vupklsh128);
   XEREGISTERINSTR(vupkd3d128);
   XEREGISTERINSTR(vxor);
   XEREGISTERINSTR(vxor128);

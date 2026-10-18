@@ -25,15 +25,7 @@ on:
       - '.github/workflows/checks.yml'
       - '.github/workflows/pages.yml'
       - 'website/**'
-  workflow_dispatch:
-    inputs:
-      package:
-        description: >-
-          test: Xendroid.compose.Mali.opt (debuggable, side by side);
-          regular: Xendroid.compose.Mali
-        type: choice
-        options: [test, regular]
-        default: test
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -77,28 +69,16 @@ jobs:
     - name: Build settings
       id: cfg
       env:
-        INPUT_PACKAGE: ${{ inputs.package }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
       run: |
         git config --global --add safe.directory "$GITHUB_WORKSPACE"
         sha=$(git rev-parse --short=8 HEAD)
-        if [ "$GITHUB_EVENT_NAME" = push ] || [ "$INPUT_PACKAGE" = regular ]; then
-          variant=regular
-          name="XenDroid_Release_$sha"
-          package=Xendroid.compose.Mali
-          package_args=""
-        else
-          variant=test
-          name="XenDroid_test_${PR_NUMBER:+pr${PR_NUMBER}_}$sha"
-          package=Xendroid.compose.Mali.opt
-          package_args="-PxendroidReleaseIdSuffix=.Mali.opt -PxendroidReleaseDebuggable"
-        fi
+        name="XenDroid_Release_${PR_NUMBER:+pr${PR_NUMBER}_}$sha"
+        package=Xendroid.compose.Mali
         {
           echo "sha=$sha"
-          echo "variant=$variant"
           echo "name=$name"
           echo "package=$package"
-          echo "package_args=$package_args"
         } >> "$GITHUB_OUTPUT"
         echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         echo "Building $package as $name.apk"
@@ -143,12 +123,11 @@ jobs:
       id: build
       env:
         SHA: ${{ steps.cfg.outputs.sha }}
-        PACKAGE_ARGS: ${{ steps.cfg.outputs.package_args }}
       run: |
         chmod +x gradlew
         ./gradlew --console=plain --build-cache --parallel \
           -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
-          -PgitHash="$SHA" -PxendroidVersionCode="$GITHUB_RUN_NUMBER" $PACKAGE_ARGS :app:assembleRelease
+          -PgitHash="$SHA" -PxendroidVersionCode="$GITHUB_RUN_NUMBER" :app:assembleRelease
         ccache -s || true
         df -h "$GITHUB_WORKSPACE" || true
 
@@ -158,14 +137,10 @@ jobs:
       env:
         NAME: ${{ steps.cfg.outputs.name }}
         PACKAGE: ${{ steps.cfg.outputs.package }}
-        VARIANT: ${{ steps.cfg.outputs.variant }}
         KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        TEST_KEYSTORE_BASE64: ${{ secrets.TEST_KEYSTORE_BASE64 }}
-        TEST_KEY_ALIAS: ${{ secrets.TEST_KEY_ALIAS }}
-        TEST_KEYSTORE_PASSWORD: ${{ secrets.TEST_KEYSTORE_PASSWORD }}
       run: |
         set +e
         bt="$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION"
@@ -186,14 +161,7 @@ jobs:
         fi
         keystore="$RUNNER_TEMP/signing.keystore"
         trap 'rm -f "$keystore"' EXIT
-        if [ "$VARIANT" = test ] && [ -n "$TEST_KEYSTORE_BASE64" ] &&
-           [ -n "$TEST_KEY_ALIAS" ] && [ -n "$TEST_KEYSTORE_PASSWORD" ]; then
-          printf '%s' "$TEST_KEYSTORE_BASE64" | base64 --decode > "$keystore"
-          signed_with=test
-          alias=$TEST_KEY_ALIAS
-          KEYSTORE_PASSWORD=$TEST_KEYSTORE_PASSWORD
-          KEY_PASSWORD=$TEST_KEYSTORE_PASSWORD
-        elif [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+        if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
           printf '%s' "$KEYSTORE_BASE64" | tr -d ' \r\n"' | base64 --decode > "$keystore"
           signed_with=release
           alias=$KEY_ALIAS
@@ -290,13 +258,3 @@ jobs:
           echo "::warning::The release notes script failed: GitHub's generated notes are used."
         fi
 
-    - name: Create GitHub release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: XenDroid-v${{ github.run_number }}-${{ needs.apk.outputs.sha }}
-        name: Xendroid Mali ${{ needs.apk.outputs.sha }} (build ${{ github.run_number }})
-        target_commitish: ${{ github.sha }}
-        body_path: ${{ steps.notes.outputs.path }}
-        generate_release_notes: ${{ steps.notes.outputs.path == '' }}
-        files: ${{ needs.apk.outputs.apk }}
-        

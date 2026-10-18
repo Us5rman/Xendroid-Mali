@@ -2228,6 +2228,7 @@ bool VulkanCommandProcessor::SetupContext() {
   EnsureZPDQueryResources();
 
   cvars::log_gpu_frame_time_breakdown = true;
+  cvars::vulkan_replay_stats = true;
     
   // Per-submission GPU timestamps for the frame time breakdown diagnostics.
   if (cvars::log_gpu_frame_time_breakdown &&

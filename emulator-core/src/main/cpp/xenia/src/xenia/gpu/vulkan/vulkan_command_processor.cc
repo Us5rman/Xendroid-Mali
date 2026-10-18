@@ -2227,6 +2227,8 @@ bool VulkanCommandProcessor::SetupContext() {
   zpd_host_query_pool_ = std::make_unique<VulkanZPDQueryPool>();
   EnsureZPDQueryResources();
 
+  cvars::log_gpu_frame_time_breakdown = true;
+    
   // Per-submission GPU timestamps for the frame time breakdown diagnostics.
   if (cvars::log_gpu_frame_time_breakdown &&
       vulkan_device->properties().timestampPeriod > 0.0f) {

@@ -1,11 +1,11 @@
-name: Xendroid+
+name: Xendroid-Mali 
 
 # Android APK build (arm64-v8a).
 # - Pull requests into main (including the claude/* branches of cloud
-#   sessions) and manual runs build the test package xendroid.compose.fork.opt:
+#   sessions) and manual runs build the test package Xendroid.compose.Mali.opt:
 #   debuggable and installed alongside the regular app, the package the A/B
 #   tools in tools/ drive.
-# - Pushes to main build the regular package xendroid.compose.fork and, when
+# - Pushes to main build the regular package Xendroid.compose.Mali and, when
 #   the signing secrets are set, publish it as a GitHub release.
 # Signing (repository secrets, all optional):
 # - release key: ANDROID_KEYSTORE_BASE64, KEY_ALIAS, KEYSTORE_PASSWORD,
@@ -45,8 +45,8 @@ on:
     inputs:
       package:
         description: >-
-          test: xendroid.compose.fork.opt (debuggable, side by side);
-          regular: xendroid.compose.fork
+          test: Xendroid.compose.Mali.opt (debuggable, side by side);
+          regular: Xendroid.compose.Mali
         type: choice
         options: [test, regular]
         default: test
@@ -104,13 +104,13 @@ jobs:
         if [ "$GITHUB_EVENT_NAME" = push ] || [ "$INPUT_PACKAGE" = regular ]; then
           variant=regular
           name="XenDroid_Release_$sha"
-          package=xendroid.compose.fork
+          package=Xendroid.compose.Mali
           package_args=""
         else
           variant=test
           name="XenDroid_test_${PR_NUMBER:+pr${PR_NUMBER}_}$sha"
-          package=xendroid.compose.fork.opt
-          package_args="-PxendroidReleaseIdSuffix=.fork.opt -PxendroidReleaseDebuggable"
+          package=Xendroid.compose.Mali.opt
+          package_args="-PxendroidReleaseIdSuffix=.Mali.opt -PxendroidReleaseDebuggable"
         fi
         {
           echo "sha=$sha"
@@ -299,8 +299,9 @@ jobs:
       with:
         # XenDroid-v<versionCode>-<sha>: parsed by updater/ReleaseTags.kt.
         tag_name: XenDroid-v${{ github.run_number }}-${{ needs.apk.outputs.sha }}
-        name: Xendroid+ ${{ needs.apk.outputs.sha }} (build ${{ github.run_number }})
+        name: Xendroid Mali ${{ needs.apk.outputs.sha }} (build ${{ github.run_number }})
         target_commitish: ${{ github.sha }}
         body_path: ${{ steps.notes.outputs.path }}
         generate_release_notes: ${{ steps.notes.outputs.path == '' }}
         files: ${{ needs.apk.outputs.apk }}
+        

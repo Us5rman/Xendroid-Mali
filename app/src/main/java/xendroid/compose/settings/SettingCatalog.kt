@@ -217,6 +217,7 @@ object SettingCatalog {
             e("Logging|flush_log", X),
             e("Logging|log_string_format_kernel_calls", X),
             e("Logging|log_high_frequency_kernel_calls", X),
+            e("Vulkan|vulkan_debug_gpu_probe", X, isNew = true),
             e("Vulkan|vulkan_log_debug_messages", X),
             e("Vulkan|vulkan_validation", X),
             e("Vulkan|vulkan_renderdoc_capture", X),

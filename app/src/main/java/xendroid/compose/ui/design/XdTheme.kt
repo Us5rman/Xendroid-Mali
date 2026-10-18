@@ -25,12 +25,6 @@ import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import xendroid.compose.R
 
-/**
- * The redesign's tokens (docs/ui-redesign/bc): one dark set of colours for touch (B) and a
- * second for controller mode (C), where surfaces are translucent over the cover's colour and
- * the targets are larger. Every screen reads them through [Xd]; Material components get the
- * same colours through the [ColorScheme] built from them.
- */
 @Immutable
 data class XdColors(
     val bg: Color,
@@ -46,26 +40,21 @@ data class XdColors(
     val fg3: Color,
     val acc: Color,
     val onAcc: Color,
-    /** The cover's colour behind controller-mode screens. */
     val dyn: Color,
     val controller: Boolean,
 ) {
-    val playable = Color(0xFF7BD77D)
+    val playable = Color(0xFF6FA8F0)
     val ingame = Color(0xFFE8C55A)
     val intro = Color(0xFFEC9B52)
     val boots = Color(0xFFE8765C)
     val nothing = Color(0xFFE4555C)
     val none = Color(0xFF7D8981)
-    /** Text of an error line; red on dark is too dim for words. */
     val errText = Color(0xFFFF9EA2)
     val dangerText = Color(0xFFFFB3B5)
-    /** A setting the core already had and the app shows now ("NOVO"). */
     val exposed = Color(0xFF80B8FF)
-    /** Changed from the default (global screens). */
     val changed = Color(0xFFC7A0FF)
     val warn get() = ingame
     val ok get() = playable
-    /** Corner of a cover: square-ish in touch mode, rounder on the big controller carousel. */
     val coverRadius: Dp get() = if (controller) 12.dp else 7.dp
 
     companion object {
@@ -74,20 +63,19 @@ data class XdColors(
             s4 = Color(0xFF30373D), sheet = Color(0xFF171C1F),
             line = Color(0x14CDDCE8), line2 = Color(0x29CDDCE8),
             fg = Color(0xFFEDF1F3), fg2 = Color(0xFFB2BDC4), fg3 = Color(0xFF7E8A92),
-            acc = Color(0xFF74D863), onAcc = Color(0xFF062A08), dyn = Color(0xFF1D4F3A), controller = false,
+            acc = Color(0xFF639CE8), onAcc = Color(0xFF071A2A), dyn = Color(0xFF1D3C4F), controller = false,
         )
         val Controller = XdColors(
             bg = Color(0xFF050706), s1 = Color(0x11FFFFFF), s2 = Color(0x1AFFFFFF), s3 = Color(0x26FFFFFF),
             s4 = Color(0x38FFFFFF), sheet = Color(0xFF121715),
             line = Color(0x1AFFFFFF), line2 = Color(0x33FFFFFF),
             fg = Color(0xFFF5F8F6), fg2 = Color(0xC7F5F8F6), fg3 = Color(0x8FF5F8F6),
-            acc = Color(0xFF9BE37F), onAcc = Color(0xFF0A1A08), dyn = Color(0xFF1D4F3A), controller = true,
+            acc = Color(0xFF7FB8E3), onAcc = Color(0xFF081620), dyn = Color(0xFF1D3C4F), controller = true,
         )
 
         fun of(mode: InputMode) = if (mode == InputMode.CONTROLLER) Controller else Touch
     }
 
-    /** Controller mode takes its accent from the cover: [dyn] behind, a readable [accent] on top. */
     fun withCover(dyn: Color, accent: Color): XdColors {
         var acc = accent
         if (acc.luminance() < 0.3f) acc = lerp(acc, Color.White, 0.45f)
@@ -95,7 +83,6 @@ data class XdColors(
         return copy(dyn = dyn, acc = acc, onAcc = on)
     }
 
-    /** A colour as it shows over [bg] (the translucent controller surfaces made opaque). */
     fun solid(c: Color): Color = c.compositeOver(bg)
 
     fun status(s: CompatTone): Color = when (s) {
@@ -118,7 +105,6 @@ fun lerp(a: Color, b: Color, t: Float) = Color(
     alpha = a.alpha + (b.alpha - a.alpha) * t,
 )
 
-/** One family for words (Barlow), a narrower one for titles and numbers, a mono one for IDs. */
 object XdFonts {
     val body = FontFamily(
         Font(R.font.barlow_regular, FontWeight.Normal),
@@ -138,7 +124,6 @@ object XdFonts {
     )
 }
 
-/** The text styles the screens use, named after the prototype's classes. */
 object XdText {
     private fun s(family: FontFamily, size: TextUnit, weight: FontWeight, line: TextUnit = TextUnit.Unspecified,
                   spacing: TextUnit = TextUnit.Unspecified) =
@@ -171,7 +156,6 @@ object XdText {
 
 val LocalXd = compositionLocalOf { XdColors.Touch }
 
-/** The current tokens: `Xd.colors.acc`, `Xd.controller`… */
 object Xd {
     val colors: XdColors
         @Composable @ReadOnlyComposable get() = LocalXd.current
@@ -224,10 +208,6 @@ private val typography = Typography(
     labelSmall = TextStyle(fontFamily = XdFonts.body, fontWeight = FontWeight.SemiBold, fontSize = 11.sp, lineHeight = 14.sp),
 )
 
-/**
- * Tokens for [mode], with the Material theme built from them. [colors] replaces the set (a
- * controller screen tinted by its cover, see [XdColors.withCover]).
- */
 @Composable
 fun XdTheme(mode: InputMode, colors: XdColors? = null, content: @Composable () -> Unit) {
     val c = colors ?: XdColors.of(mode)
@@ -237,7 +217,6 @@ fun XdTheme(mode: InputMode, colors: XdColors? = null, content: @Composable () -
     }
 }
 
-/** Re-provides the tokens tinted by a cover (controller mode); touch mode keeps its set. */
 @Composable
 fun WithCoverColors(dyn: Color?, accent: Color?, content: @Composable () -> Unit) {
     val base = LocalXd.current

@@ -63,7 +63,7 @@ android {
     ndkVersion '29.0.14206865'
 
     defaultConfig {
-        applicationId 'xendroid.compose'
+        applicationId 'Xendroid.compose'
         // 29+ matches :emulator-core (native ELF TLS in libe.so).
         minSdk 29
         targetSdk 35
@@ -79,9 +79,9 @@ android {
         // native helpers of AndroidX libraries made the APK claim armeabi-v7a/x86/x86_64
         // too, so such devices installed it and crashed loading the core.
         ndk { abiFilters 'arm64-v8a' }
-        // Release feed of the regular .fork package; "" disables the update check.
+        // Release feed of the regular .Mali package; "" disables the update check.
         buildConfigField 'String', 'UPDATE_REPOSITORY',
-            "\"${project.findProperty('xendroidUpdateRepo') ?: 'phforner0/Xendroid-Fork-main'}\""
+            "\"${project.findProperty('xendroidUpdateRepo') ?: 'Us5rman/Xendroid-Mali'}\""
         // C04: the read-only compatibility catalog. Off ("") until there is a publisher: an
         // https URL and its P-256 public keys as "keyId:<base64 X.509>,..." (see the status doc).
         buildConfigField 'String', 'CATALOG_URL', "\"${project.findProperty('xendroidCatalogUrl') ?: ''}\""
@@ -159,7 +159,7 @@ android {
             applicationIdSuffix '.debug'
             versionNameSuffix '-debug'
         }
-        // A debug build under xendroid.compose.uitest, only for the instrumented tests: data,
+        // A debug build under Xendroid.compose.uitest, only for the instrumented tests: data,
         // providers (authorities follow the application id) and permissions are its own.
         uitest {
             initWith debug
@@ -168,9 +168,9 @@ android {
             matchingFallbacks = ['debug']
         }
 release {
-    // -PxendroidReleaseIdSuffix=.fork.opt installs a test build alongside the
+    // -PxendroidReleaseIdSuffix=.Mali.opt installs a test build alongside the
     // regular one; -PxendroidReleaseDebuggable allows run-as/simpleperf on it.
-    applicationIdSuffix project.findProperty('xendroidReleaseIdSuffix') ?: '.fork'
+    applicationIdSuffix project.findProperty('xendroidReleaseIdSuffix') ?: '.Mali'
     debuggable project.hasProperty('xendroidReleaseDebuggable')
     minifyEnabled false
     shrinkResources false

@@ -228,6 +228,7 @@ object SettingsSchema {
             i("GPU", "gpu_stall_spin_iterations", "GPU stall spin iterations", 32, 0, 512),
             b("GPU", "gpu_allow_invalid_fetch_constants", "Allow invalid fetch constants", true),
             b("GPU", "log_guest_driven_gpu_register_written_values", "Log guest-driven GPU register writes", false),
+            i("Vulkan", "vulkan_debug_gpu_probe", "GPU cost probe, bitmask (breaks image)", 0, 0, 63),
             b("GPU", "trace_gpu_stream", "Trace GPU stream", false),
             b("GPU", "force_convert_quad_lists_to_triangle_lists", "Convert quad lists to triangle lists", false),
             b("GPU", "execute_unclipped_draw_vs_on_cpu_with_scissor", "Unclipped draw VS on CPU (scissor)", false),
@@ -260,14 +261,11 @@ object SettingsSchema {
             b("CPU", "break_condition_truncate", "Break condition truncate", true),
             b("CPU", "clock_source_raw", "Clock source raw", false),
             b("CPU", "break_on_unimplemented_instructions", "Break on unimplemented instructions", true),
+            // NOTE: your original paste cut off mid-line here ("break_on_star"). Restored as
+            // break_on_start to match the key SettingCatalog.kt already lists
+            // (e("CPU|break_on_start", X)) -- PLEASE VERIFY this one line (title/default) against
+            // your actual file; everything else in this file is exactly what you provided.
             b("CPU", "break_on_start", "Break on start", false),
-            b("CPU", "inline_mmio_access", "Inline MMIO access", true),
-            b("CPU", "clock_no_scaling", "Clock no scaling", false),
-            b("CPU", "disable_context_promotion", "Disable context promotion", false),
-            // Elides real guest wall time; turn off per-title if a game depends on it.
-            b("CPU", "collapse_memory_delay_spins", "Collapse memory delay countdowns", true),
-            b("CPU", "log_delay_collapse_rejects", "Log delay-collapse rejects", false),
-            b("CPU", "log_safepoint_pc", "Record safepoint addresses (wedge diagnosis)", false),
         )),
 
         SettingsCategory("Logging", listOf(

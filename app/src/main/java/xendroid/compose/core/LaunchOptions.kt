@@ -100,7 +100,6 @@ data class LaunchOptions(
             is Setting.Bool -> value == "true" || value == "false"
             is Setting.IntRange -> value.toIntOrNull()?.let { it in s.min..s.max } ?: false
             is Setting.ListChoice -> ConfigValueShape.listOption(s.options.map { it.value }, raw)?.takeIf { v -> s.options.any { it.value == v } } ?: s.default
-                else s.options.any { it.value == value }
             is Setting.Text -> true
             is Setting.Action -> false
         }

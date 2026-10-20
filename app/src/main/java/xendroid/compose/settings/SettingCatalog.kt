@@ -31,7 +31,7 @@ data class SettingMeta(
 
 data class Dependency(val key: String, val value: String)
 
-enum class Warning { NEEDS_BARYCENTRICS, NO_EFFECT_ON_TURNIP, NEEDS_MAX_CLOCKS }
+enum class Warning { NEEDS_BARYCENTRICS }
 
 object SettingCatalog {
     private val E = SettingLevel.ESSENTIAL
@@ -81,9 +81,6 @@ object SettingCatalog {
             e("GPU|store_shaders", A),
             e("Kernel|precise_guest_delays", A, isNew = true),
             e("APU|apu_performance_hint", A, isNew = true),
-            e("Vulkan|adrenotools_force_max_clocks", A),
-            e("Vulkan|adrenotools_turbo_reassert_seconds", A, isNew = true, dependsOn = "Vulkan|adrenotools_force_max_clocks" to "true",
-                warning = Warning.NEEDS_MAX_CLOCKS),
             e("Vulkan|vulkan_pipeline_creation_threads", A),
             e("GPU|vulkan_mid_frame_submission_draws", X),
             e("Kernel|guest_scheduler", X),
@@ -123,7 +120,7 @@ object SettingCatalog {
             e("GPU|precise_interpolation", A, isNew = true, warning = Warning.NEEDS_BARYCENTRICS),
             e("GPU|depth_bias_shader_offset", A, isNew = true),
             e("GPU|readback_resolve", X),
-            e("GPU|memexport_enable", X, isNew = true, warning = Warning.NO_EFFECT_ON_TURNIP),
+            e("GPU|memexport_enable", X, isNew = true),
             e("Vulkan|vulkan_allow_reverse_z", X, isNew = true),
             e("Kernel|stack_size_multiplier_hack", X, isNew = true),
             e("CPU|collapse_memory_delay_spins", X),
@@ -160,7 +157,6 @@ object SettingCatalog {
         ),
         SettingGroup.DRIVER to listOf(
             e("Vulkan|vulkan_lib_path", E),
-            e("Vulkan|turnip_debug", X),
             e("Vulkan|vulkan_dynamic_rendering", X, isNew = true),
             e("Vulkan|vulkan_avoid_geometry_shaders", X, isNew = true),
             e("Vulkan|vulkan_depth_unorm24", X, isNew = true),

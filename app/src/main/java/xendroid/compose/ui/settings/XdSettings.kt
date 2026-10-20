@@ -371,8 +371,6 @@ private fun dependencyText(s: Setting, editing: SettingsEditing): String? {
 @Composable
 private fun warningText(w: Warning): String = stringResource(when (w) {
     Warning.NEEDS_BARYCENTRICS -> R.string.xd_set_warn_barycentrics
-    Warning.NO_EFFECT_ON_TURNIP -> R.string.xd_set_warn_turnip
-    Warning.NEEDS_MAX_CLOCKS -> R.string.xd_set_warn_max_clocks
 })
 
 /**

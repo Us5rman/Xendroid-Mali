@@ -53,8 +53,6 @@ data class LaunchOptions(
 
     companion object {
         const val DRIVER = "vulkan_lib_path"
-        /** TU_DEBUG: any list of flags, not only the combinations the list offers. */
-        private const val TURNIP = "Vulkan|turnip_debug"
         private const val MAX_VALUE = 1024
         private const val MAX_ARGS = 256
         private val XUID = Regex("[0-9A-F]{16}")

@@ -75,7 +75,7 @@ DEFINE_bool(
     "Vulkan");
 
 DEFINE_bool(
-    vulkan_bc_to_etc2, false,
+    vulkan_bc_to_etc2, true,
     "Where the device can't sample BC1, convert DXT1 textures to ETC2 (RGB8 "
     "with 1-bit alpha) on the GPU as they are loaded, instead of expanding "
     "them to RGBA8 - the converted data is as big as the original. Needs "

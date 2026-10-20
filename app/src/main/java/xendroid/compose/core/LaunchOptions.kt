@@ -70,8 +70,8 @@ data class LaunchOptions(
         fun cliValue(s: Setting, raw: String): String = when (s) {
             is Setting.Bool -> ConfigValueShape.bool(ConfigValueShape.parseBool(raw, s.default))
             is Setting.IntRange -> ConfigValueShape.parseInt(raw, s.default).coerceIn(s.min, s.max).toString()
-            is Setting.ListChoice -> ConfigValueShape.listOption(s.options.map { it.value }, raw)?.takeIf { v -> s.options.any { it.value == v } } ?: s.default
-                else ConfigValueShape.listOption(s.options.map { it.value }, raw)?.takeIf { v -> s.options.any { it.value == v } } ?: s.default
+            is Setting.ListChoice ->
+                ConfigValueShape.listOption(s.options.map { it.value }, raw)?.takeIf { v -> s.options.any { it.value == v } } ?: s.default
             is Setting.Text -> raw
             is Setting.Action -> raw
         }
@@ -99,7 +99,7 @@ data class LaunchOptions(
         private fun valid(s: Setting, value: String): Boolean = when (s) {
             is Setting.Bool -> value == "true" || value == "false"
             is Setting.IntRange -> value.toIntOrNull()?.let { it in s.min..s.max } ?: false
-            is Setting.ListChoice -> ConfigValueShape.listOption(s.options.map { it.value }, raw)?.takeIf { v -> s.options.any { it.value == v } } ?: s.default
+            is Setting.ListChoice -> s.options.any { it.value == value }
             is Setting.Text -> true
             is Setting.Action -> false
         }

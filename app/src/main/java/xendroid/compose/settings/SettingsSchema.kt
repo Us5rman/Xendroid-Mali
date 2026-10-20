@@ -29,19 +29,10 @@ object SettingsSchema {
             // accepts -1 (auto), but a 0..5 slider is the intended UX.
             i("Vulkan", "vulkan_pipeline_creation_threads", "Pipeline creation threads", 4, 0, 5),
             Action("Vulkan", "vulkan_lib_path", "Custom Vulkan driver", "", desc("vulkan_lib_path")),
-            b("Vulkan", "adrenotools_force_max_clocks", "Force max GPU clocks (adrenotools)", false),
-            // Redesign: the core's own cvars the app now shows (vulkan_instance.cc, the Vulkan backend).
-            i("Vulkan", "adrenotools_turbo_reassert_seconds", "Request max GPU clocks again every (s)", 5, 0, 30),
             b("Vulkan", "vulkan_allow_reverse_z", "Reverse depth ranges in the driver", true),
             b("Vulkan", "vulkan_dynamic_rendering", "Dynamic rendering", true),
             b("Vulkan", "vulkan_avoid_geometry_shaders", "Avoid geometry shaders", true),
             b("Vulkan", "vulkan_depth_unorm24", "Native D24 depth", true),
-            // 'sysmem' forces untiled rendering (much slower) but avoids a class of Adreno GPU
-            // hangs. Applied at vkCreateInstance, so it takes effect on the next game launch.
-            l("Vulkan", "turnip_debug", "Turnip debug mode", "sysmem",
-                "" to "None (no TU_DEBUG flags, GMEM)", "sysmem" to "sysmem (untiled, slower)",
-                "sysmem,nolrz" to "sysmem + nolrz (LRZ off, perf diagnostic)",
-                "sysmem,noubwc" to "sysmem + noubwc (UBWC off, perf diagnostic)"),
             b("Vulkan", "vulkan_in_pass_resolve", "In-pass EDRAM resolve", true),
             b("Vulkan", "vulkan_resolve_to_texture_promote", "Resolve-to-texture: promote", true),
             b("Vulkan", "vulkan_resolve_to_texture", "Resolve-to-texture: store", true),
@@ -261,10 +252,6 @@ object SettingsSchema {
             b("CPU", "break_condition_truncate", "Break condition truncate", true),
             b("CPU", "clock_source_raw", "Clock source raw", false),
             b("CPU", "break_on_unimplemented_instructions", "Break on unimplemented instructions", true),
-            // NOTE: your original paste cut off mid-line here ("break_on_star"). Restored as
-            // break_on_start to match the key SettingCatalog.kt already lists
-            // (e("CPU|break_on_start", X)) -- PLEASE VERIFY this one line (title/default) against
-            // your actual file; everything else in this file is exactly what you provided.
             b("CPU", "break_on_start", "Break on start", false),
         )),
 

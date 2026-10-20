@@ -327,7 +327,6 @@ fun optionText(context: Context, s: Setting.ListChoice, value: String, english: 
             "", "bilinear" -> "Bilinear"; "cas" -> "AMD CAS"; "fsr" -> "FSR 1"; "sgsr" -> "SGSR (beta)"; "lanczos" -> "Lanczos"; "crt" -> "CRT"; else -> english
         }
         "Console|internal_display_resolution" -> if (value == "17") t(R.string.xd_opt_custom) else english
-        "Vulkan|turnip_debug" -> xendroid.compose.settings.TurnipFlags.parse(value).joinToString(", ").ifEmpty { t(R.string.xd_drv_turnip_none) }
         "Kernel|kernel_display_gamma_type" -> when (value) { "0" -> "Linear"; "1" -> "sRGB (CRT)"; "2" -> "BT.709 (HDTV)"; "3" -> t(R.string.xd_opt_gamma_power); else -> english }
         "GPU|occlusion_query" -> when (value) {
             "fake" -> t(R.string.xd_opt_occ_fake); "fast" -> t(R.string.xd_opt_occ_fast)

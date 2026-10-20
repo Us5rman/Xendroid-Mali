@@ -505,7 +505,6 @@ private fun TurnipBody(global: SettingsViewModel, raw: String) {
                 }
             }
         }
-        TurnipFlags.unknown(raw).takeIf { it.isNotEmpty() }?.let { XdNote(stringResource(R.string.xd_drv_turnip_kept, it.joinToString(","))) }
         Text(stringResource(R.string.xd_drv_turnip_result, on.joinToString(",").ifEmpty { stringResource(R.string.xd_drv_turnip_none) }),
             style = XdText.mono, color = c.fg2)
     }

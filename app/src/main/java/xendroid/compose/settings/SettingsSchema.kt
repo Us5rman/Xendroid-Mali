@@ -318,6 +318,7 @@ object SettingsSchema {
         "GPU|anisotropic_override",
         "Console|widescreen", "Console|internal_display_resolution",
         "Vulkan|vulkan_lib_path",
+        "Vulkan|vulkan_bc_to_etc2",
         "HID|show_touch_overlay", "HID|left_stick_deadzone_percentage", "HID|right_stick_deadzone_percentage",
         "UI|android_soft_keyboard", "UI|android_message_box",
         "UI|show_achievement_notification",

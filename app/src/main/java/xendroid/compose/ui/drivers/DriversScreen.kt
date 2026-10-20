@@ -44,7 +44,6 @@ import xendroid.compose.driver.InstalledDriverPackage
 import xendroid.compose.driver.InstalledDrivers
 import xendroid.compose.settings.SettingsSchema
 import xendroid.compose.settings.SettingsViewModel
-import xendroid.compose.settings.TurnipFlags
 import xendroid.compose.settings.setRaw
 import xendroid.compose.ui.design.BadgeTone
 import xendroid.compose.ui.design.GameCover
@@ -75,7 +74,6 @@ import xendroid.compose.ui.settings.driverName
 
 private const val PREFS = "xendroid_driver_manager"
 private const val KEY = "Vulkan|vulkan_lib_path"
-private const val TURNIP = "Vulkan|turnip_debug"
 
 /**
  * The driver manager's state: the choice of every game ([global] config), what the last run
@@ -213,7 +211,7 @@ class DriversState(private val context: Context, private val global: SettingsVie
 
 /**
  * Drivers (docs/ui-redesign/bc, batch 1): what every game uses and what the last session really
- * loaded, the installed packages, the downloads of the sources, the sources and the Turnip flags.
+ * loaded, the installed packages, the downloads of the sources, and the sources.
  */
 @Composable
 fun DriversScreen(
@@ -243,7 +241,7 @@ fun DriversScreen(
             NowBody(state, current, gamesWithDriver, onGameSettings, gameName, gameArt, onSection = { section = it })
         },
         XdSection("drv:inst", stringResource(R.string.xd_drv_installed), XdIcons.check, badge = state.installed?.let { (it.size + 1).toString() }) {
-            InstalledBody(state, current, gamesWithDriver, onImport = { pickZip.launch(arrayOf("application/zip")) }, onRemove = { removing = it })
+            InstalledBody(state, current, gamesWithDriver, onImport = { pickZip.launch(arrayOf<String>("application/zip", "application/x-zip-compressed", "application/octet-stream", "*/*")) }, onRemove = { removing = it })
         },
         XdSection("drv:avail", stringResource(R.string.xd_drv_available), XdIcons.download,
             badge = state.available?.count { state.installedPath(it) == null }?.takeIf { it > 0 }?.toString()) {
@@ -251,7 +249,6 @@ fun DriversScreen(
         },
         XdSection("drv:src", stringResource(R.string.xd_drv_sources), XdIcons.cloud, group = stringResource(R.string.xd_drv_group_advanced),
             badge = state.sources.size.toString()) { SourcesBody(state) },
-        XdSection("drv:tu", stringResource(R.string.xd_drv_turnip), XdIcons.flask) { TurnipBody(global, values[TURNIP]?.raw ?: "sysmem") },
     )
     XdSectionedScreen(
         title = stringResource(R.string.xd_drv_title),
@@ -488,41 +485,4 @@ private fun SourcesBody(state: DriversState) {
         }
         Text(stringResource(R.string.drv_sources_note), style = XdText.note, color = c.fg3)
     }
-}
-
-@Composable
-private fun TurnipBody(global: SettingsViewModel, raw: String) {
-    val c = Xd.colors
-    val s = SettingsSchema.byKey[TURNIP] ?: return
-    val on = TurnipFlags.parse(raw)
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(stringResource(R.string.xd_drv_turnip_note), style = XdText.note, color = c.fg3)
-        XdCard {
-            TurnipFlags.KNOWN.forEachIndexed { i, flag ->
-                XdListRow(flag.name, subtitle = turnipHelp(flag.name) ?: flag.help, divider = i < TurnipFlags.KNOWN.lastIndex,
-                    lead = { Text("TU", style = XdText.monoSm, color = c.fg3) }) {
-                    XdSwitch(flag.name in on, { global.setRaw(s, TurnipFlags.toggle(raw, flag.name)) }, contentDescription = flag.name)
-                }
-            }
-        }
-        Text(stringResource(R.string.xd_drv_turnip_result, on.joinToString(",").ifEmpty { stringResource(R.string.xd_drv_turnip_none) }),
-            style = XdText.mono, color = c.fg2)
-    }
-}
-
-/** The flags' help in the shown language (the English one stays in [TurnipFlags]). */
-@Composable
-private fun turnipHelp(flag: String): String? = when (flag) {
-    "sysmem" -> stringResource(R.string.xd_tu_sysmem)
-    "gmem" -> stringResource(R.string.xd_tu_gmem)
-    "nolrz" -> stringResource(R.string.xd_tu_nolrz)
-    "nolrzfc" -> stringResource(R.string.xd_tu_nolrzfc)
-    "noubwc" -> stringResource(R.string.xd_tu_noubwc)
-    "nomultipos" -> stringResource(R.string.xd_tu_nomultipos)
-    "noconcurrentresolves" -> stringResource(R.string.xd_tu_noconcurrentresolves)
-    "noconcurrentunresolves" -> stringResource(R.string.xd_tu_noconcurrentunresolves)
-    "forcebin" -> stringResource(R.string.xd_tu_forcebin)
-    "flushall" -> stringResource(R.string.xd_tu_flushall)
-    "syncdraw" -> stringResource(R.string.xd_tu_syncdraw)
-    else -> null
 }

@@ -41,6 +41,7 @@ object SettingsSchema {
             // reuse is on) picks edge's bitmask gate vs the content-hash gate for A/B.
             b("Vulkan", "vulkan_cache_texture_descriptors", "Cache texture descriptors", true),
             b("Vulkan", "vulkan_texture_descriptor_reuse_edge", "Texture descriptor gate: edge (off = hash)", false),
+            b("Vulkan", "vulkan_bc_to_etc2", "Convert DXT1 to ETC2", false),
         )),
 
         SettingsCategory("Video", listOf(

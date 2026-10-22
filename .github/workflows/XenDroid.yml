@@ -1,4 +1,4 @@
-name: Xendroid+
+name: Xendroid-Mali
 
 # Android APK build (arm64-v8a).
 # - Pull requests into main (including the claude/* branches of cloud

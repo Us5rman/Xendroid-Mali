@@ -21,10 +21,10 @@ object SettingsSchema {
             b("Vulkan", "vulkan_renderdoc_capture", "RenderDoc capture layer", false),
             b("Vulkan", "vulkan_allow_present_mode_immediate", "Allow present mode: immediate", true),
             b("Vulkan", "vulkan_allow_present_mode_mailbox", "Allow present mode: mailbox", false),
-            b("Vulkan", "vulkan_allow_present_mode_fifo_relaxed", "Allow present mode: FIFO relaxed", true),
+            b("Vulkan", "vulkan_allow_present_mode_fifo_relaxed", "Allow present mode: FIFO relaxed", false),
             b("Vulkan", "vulkan_async_skip_draws", "Async skip draws", true),
-            b("Vulkan", "vulkan_placeholder_pipelines", "Placeholder pipelines", false),
-            b("Vulkan", "vulkan_dynamic_pipeline_state", "Extended dynamic state", true),
+            b("Vulkan", "vulkan_placeholder_pipelines", "Placeholder pipelines", true),
+            b("Vulkan", "vulkan_dynamic_pipeline_state", "Extended dynamic state", false),
             // A slider, not a dropdown: 0 = synchronous, 1..5 = explicit. The native cvar also
             // accepts -1 (auto), but a 0..5 slider is the intended UX.
             i("Vulkan", "vulkan_pipeline_creation_threads", "Pipeline creation threads", 4, 0, 5),
@@ -33,7 +33,7 @@ object SettingsSchema {
             b("Vulkan", "vulkan_dynamic_rendering", "Dynamic rendering", true),
             b("Vulkan", "vulkan_avoid_geometry_shaders", "Avoid geometry shaders", true),
             b("Vulkan", "vulkan_depth_unorm24", "Native D24 depth", true),
-            b("Vulkan", "vulkan_bc_to_etc2", "Convert DXT1 to ETC2", true),
+            b("Vulkan", "vulkan_bc_to_etc2", "ETC2 transcode", true),
             b("Vulkan", "vulkan_in_pass_resolve", "In-pass EDRAM resolve", true),
             b("Vulkan", "vulkan_resolve_to_texture_promote", "Resolve-to-texture: promote", true),
             b("Vulkan", "vulkan_resolve_to_texture", "Resolve-to-texture: store", true),

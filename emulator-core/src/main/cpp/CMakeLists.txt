@@ -121,14 +121,17 @@ add_custom_command(OUTPUT "${XENDROID_COLOR_HEADER}"
 add_custom_target(xendroid-color-shader DEPENDS "${XENDROID_COLOR_HEADER}")
 add_dependencies(xenia-ui-vulkan xendroid-color-shader)
 target_include_directories(xenia-ui-vulkan PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+
+# BC to ETC2 / EAC texture conversion shader (read by gpu/vulkan/vulkan_texture_cache.cc).
+# It sits next to the color filter shader, in the folder this build is known to read.
 set(XENDROID_BC_SPV "${CMAKE_CURRENT_BINARY_DIR}/xendroid_bc_etc.spv")
 set(XENDROID_BC_HEADER "${CMAKE_CURRENT_BINARY_DIR}/xendroid_bc_etc.inc")
 add_custom_command(OUTPUT "${XENDROID_BC_HEADER}"
     COMMAND "${XENDROID_GLSLANG}" -V --target-env vulkan1.0
-        "${CMAKE_CURRENT_SOURCE_DIR}/xenia/src/xenia/gpu/vulkan/shaders/xendroid_bc_etc.comp" -o "${XENDROID_BC_SPV}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/xenia/src/xenia/ui/vulkan/shaders/xendroid_bc_etc.comp" -o "${XENDROID_BC_SPV}"
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../../../../tools/spirv-to-header.py"
         "${XENDROID_BC_SPV}" "${XENDROID_BC_HEADER}" xendroid_bc_etc_spv
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/xenia/src/xenia/gpu/vulkan/shaders/xendroid_bc_etc.comp"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/xenia/src/xenia/ui/vulkan/shaders/xendroid_bc_etc.comp"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../../tools/spirv-to-header.py")
 add_custom_target(xendroid-bc-shader DEPENDS "${XENDROID_BC_HEADER}")
 add_dependencies(xenia-gpu-vulkan xendroid-bc-shader)

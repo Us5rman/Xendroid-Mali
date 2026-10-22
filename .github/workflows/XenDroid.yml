@@ -1,5 +1,21 @@
-name: Xendroid-Mali
+name: Xendroid+
 
+# Android APK build (arm64-v8a).
+# - Pull requests into main (including the claude/* branches of cloud
+#   sessions) and manual runs build the test package Xendroid.compose.Mali.opt:
+#   debuggable and installed alongside the regular app, the package the A/B
+#   tools in tools/ drive.
+# - Pushes to main build the regular package Xendroid.compose.Mali and, when
+#   the signing secrets are set, publish it as a GitHub release.
+# Signing (repository secrets, all optional):
+# - release key: ANDROID_KEYSTORE_BASE64, KEY_ALIAS, KEYSTORE_PASSWORD,
+#   KEY_PASSWORD (defaults to the keystore password). Needed for releases.
+# - test key, used for test builds before the release key: TEST_KEYSTORE_BASE64,
+#   TEST_KEY_ALIAS, TEST_KEYSTORE_PASSWORD (also the key password). With the key
+#   of the test builds already on the phone, CI builds install over them.
+# Without a key the APK is signed with a temporary key made for the run: it
+# installs, but not over a build signed with another key, and no release is
+# published.
 on:
   push:
     branches: [main]
@@ -25,13 +41,23 @@ on:
       - '.github/workflows/checks.yml'
       - '.github/workflows/pages.yml'
       - 'website/**'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      package:
+        description: >-
+          test: Xendroid.compose.Mali.opt (debuggable, side by side);
+          regular: Xendroid.compose.Mali
+        type: choice
+        options: [test, regular]
+        default: test
 
 permissions:
   contents: read
 
 concurrency:
   group: xendroid-${{ github.event.pull_request.number || github.ref }}
+  # A new push to a pull request replaces its running build; main builds
+  # (releases) always finish.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -51,6 +77,7 @@ jobs:
       LANG: C.UTF-8
       LC_ALL: C.UTF-8
       GRADLE_OPTS: -Dorg.gradle.daemon=false
+      # Native compile cache (emulator-core/build.gradle adds the launcher).
       USE_CCACHE: 'true'
       CCACHE_COMPILERCHECK: content
 
@@ -69,25 +96,43 @@ jobs:
     - name: Build settings
       id: cfg
       env:
+        INPUT_PACKAGE: ${{ inputs.package }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
       run: |
         git config --global --add safe.directory "$GITHUB_WORKSPACE"
         sha=$(git rev-parse --short=8 HEAD)
-        name="XenDroid_Release_${PR_NUMBER:+pr${PR_NUMBER}_}$sha"
-        package=Xendroid.compose.Mali
+        if [ "$GITHUB_EVENT_NAME" = push ] || [ "$INPUT_PACKAGE" = regular ]; then
+          variant=regular
+          name="XenDroid_Release_$sha"
+          package=Xendroid.compose.Mali
+          package_args=""
+        else
+          variant=test
+          name="XenDroid_test_${PR_NUMBER:+pr${PR_NUMBER}_}$sha"
+          package=Xendroid.compose.Mali.opt
+          package_args="-PxendroidReleaseIdSuffix=.Mali.opt -PxendroidReleaseDebuggable"
+        fi
         {
           echo "sha=$sha"
+          echo "variant=$variant"
           echo "name=$name"
           echo "package=$package"
+          echo "package_args=$package_args"
         } >> "$GITHUB_OUTPUT"
+        # Paths inside the container (github.workspace is the host path).
         echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         echo "Building $package as $name.apk"
+
+    - name: List the BC shader files
+      run: |
+        find emulator-core -iname '*bc_etc*' -o -iname '*bc_eac*' | cat -A
+        git ls-files | grep -i 'bc_etc' | cat -A || true
 
     - name: Install system tools
       run: |
         apt-get update -qq
         DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-          ninja-build python3 glslang-tools spirv-tools ccache
+          ninja-build python3 glslang-tools spirv-tools ccache advancecomp zip unzip
 
     - name: Set up Gradle
       uses: gradle/actions/setup-gradle@v4
@@ -120,48 +165,65 @@ jobs:
         max-size: 2G
 
     - name: Build release APK
-      id: build
       env:
         SHA: ${{ steps.cfg.outputs.sha }}
+        PACKAGE_ARGS: ${{ steps.cfg.outputs.package_args }}
       run: |
         chmod +x gradlew
+        # PACKAGE_ARGS holds several arguments (unquoted on purpose).
+        # The run number orders builds for the in-app updater (versionCode); the
+        # release tag below carries the same number.
         ./gradlew --console=plain --build-cache --parallel \
           -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
-          -PgitHash="$SHA" -PxendroidVersionCode="$GITHUB_RUN_NUMBER" :app:assembleRelease
+          -PgitHash="$SHA" -PxendroidVersionCode="$GITHUB_RUN_NUMBER" $PACKAGE_ARGS :app:assembleRelease
         ccache -s || true
         df -h "$GITHUB_WORKSPACE" || true
 
     - name: Sign APK
       id: sign
-      if: steps.build.outcome == 'success'
       env:
         NAME: ${{ steps.cfg.outputs.name }}
         PACKAGE: ${{ steps.cfg.outputs.package }}
+        VARIANT: ${{ steps.cfg.outputs.variant }}
         KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        TEST_KEYSTORE_BASE64: ${{ secrets.TEST_KEYSTORE_BASE64 }}
+        TEST_KEY_ALIAS: ${{ secrets.TEST_KEY_ALIAS }}
+        TEST_KEYSTORE_PASSWORD: ${{ secrets.TEST_KEYSTORE_PASSWORD }}
       run: |
-        set +e
+        set -eu
         bt="$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION"
-        unsigned=$(ls app/build/outputs/apk/release/*.apk 2>/dev/null | head -n 1)
-        if [ -z "$unsigned" ]; then
-          echo "::warning::No unsigned APK found from the build step."
-          echo "ok=false" >> "$GITHUB_OUTPUT"
-          exit 0
+        unsigned=$(ls app/build/outputs/apk/release/*.apk | head -n 1)
+        # Recompress every deflated entry with zopfli. resources.arsc has to stay
+        # stored (Android 11+ refuses a compressed one), so it is taken out first
+        # and put back stored. On any failure the Gradle APK is used as it is.
+        before=$(stat -c %s "$unsigned")
+        work="$RUNNER_TEMP/recompressed.apk"
+        cp "$unsigned" "$work"
+        if unzip -p "$unsigned" resources.arsc > "$RUNNER_TEMP/resources.arsc" &&
+           zip -q -d "$work" resources.arsc &&
+           advzip -z -4 -i 15 "$work" &&
+           (cd "$RUNNER_TEMP" && zip -q -0 -X "$work" resources.arsc) &&
+           unzip -tq "$work" > /dev/null &&
+           unzip -v "$work" resources.arsc | grep -q Stored; then
+          unsigned="$work"
+          echo "Recompressed the APK: $before -> $(stat -c %s "$work") bytes"
+        else
+          echo "::warning::Recompression failed, signing the Gradle APK as it is."
         fi
         "$bt/zipalign" -f -p 4 "$unsigned" "$RUNNER_TEMP/aligned.apk"
-        if [ $? -ne 0 ]; then
-          echo "::warning::zipalign failed; uploading the unaligned, unsigned APK instead."
-          cp "$unsigned" "$NAME.apk"
-          echo "apk=$NAME.apk" >> "$GITHUB_OUTPUT"
-          echo "signed_with=none" >> "$GITHUB_OUTPUT"
-          echo "ok=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
         keystore="$RUNNER_TEMP/signing.keystore"
         trap 'rm -f "$keystore"' EXIT
-        if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+        if [ "$VARIANT" = test ] && [ -n "$TEST_KEYSTORE_BASE64" ] &&
+           [ -n "$TEST_KEY_ALIAS" ] && [ -n "$TEST_KEYSTORE_PASSWORD" ]; then
+          printf '%s' "$TEST_KEYSTORE_BASE64" | tr -d ' \r\n"' | base64 --decode > "$keystore"
+          signed_with=test
+          alias=$TEST_KEY_ALIAS
+          KEYSTORE_PASSWORD=$TEST_KEYSTORE_PASSWORD
+          KEY_PASSWORD=$TEST_KEYSTORE_PASSWORD
+        elif [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
           printf '%s' "$KEYSTORE_BASE64" | tr -d ' \r\n"' | base64 --decode > "$keystore"
           signed_with=release
           alias=$KEY_ALIAS
@@ -179,18 +241,11 @@ jobs:
           signed_with=temporary
           alias=ci
         fi
+        # Read by apksigner from the environment, never on the command line.
         export KEYSTORE_PASSWORD KEY_PASSWORD
         "$bt/apksigner" sign --ks "$keystore" --ks-key-alias "$alias" \
           --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \
           --out "$NAME.apk" "$RUNNER_TEMP/aligned.apk"
-        if [ $? -ne 0 ]; then
-          echo "::warning::apksigner failed; uploading the aligned, unsigned APK instead."
-          cp "$RUNNER_TEMP/aligned.apk" "$NAME.apk"
-          echo "apk=$NAME.apk" >> "$GITHUB_OUTPUT"
-          echo "signed_with=none" >> "$GITHUB_OUTPUT"
-          echo "ok=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
         "$bt/apksigner" verify --print-certs "$NAME.apk" | grep -E 'Signer #1 certificate (DN|SHA-256)'
         {
           echo "### $NAME.apk"
@@ -200,23 +255,35 @@ jobs:
         } >> "$GITHUB_STEP_SUMMARY"
         echo "apk=$NAME.apk" >> "$GITHUB_OUTPUT"
         echo "signed_with=$signed_with" >> "$GITHUB_OUTPUT"
-        echo "ok=true" >> "$GITHUB_OUTPUT"
+
+    - name: Check APK packaging
+      env:
+        APK: ${{ steps.sign.outputs.apk }}
+      # arm64-only core with JNI_OnLoad, signed, license texts present, no DLL,
+      # shader cache, game image or profile data inside.
+      run: python3 tools/check-apk.py "$APK" --aapt2 "$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION/aapt2"
+
+    - name: APK size breakdown
+      env:
+        APK: ${{ steps.sign.outputs.apk }}
+      run: |
+        python3 - "$APK" >> "$GITHUB_STEP_SUMMARY" <<'PYEOF'
+        import sys, zipfile
+        z = zipfile.ZipFile(sys.argv[1])
+        rows = sorted(z.infolist(), key=lambda i: i.compress_size, reverse=True)[:25]
+        print("### Largest files in the APK (compressed / original)")
+        for i in rows:
+            print(f"- {i.filename}: {i.compress_size / 1048576:.1f} MB / {i.file_size / 1048576:.1f} MB")
+        PYEOF
 
     - name: Upload APK
-      if: always() && steps.sign.outputs.apk != ''
       uses: actions/upload-artifact@v4
       with:
         name: ${{ steps.cfg.outputs.name }}
         path: ${{ steps.sign.outputs.apk }}
         if-no-files-found: error
         retention-days: 14
-        compression-level: 0
-
-    - name: Check APK packaging
-      if: steps.sign.outputs.apk != '' && steps.sign.outputs.ok == 'true'
-      env:
-        APK: ${{ steps.sign.outputs.apk }}
-      run: python3 tools/check-apk.py "$APK" --aapt2 "$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION/aapt2"
+        compression-level: 9
 
   release:
     name: GitHub release
@@ -227,9 +294,11 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      # The merged pull requests' descriptions, for their release notes.
       pull-requests: read
 
     steps:
+    # Before the download: checkout cleans the workspace.
     - name: Checkout the release notes script
       uses: actions/checkout@v4
       with:
@@ -241,6 +310,8 @@ jobs:
       with:
         name: ${{ needs.apk.outputs.name }}
 
+    # The notes the merged pull requests wrote (tools/release_notes.py). If the script
+    # fails, the release still goes out, with GitHub's generated notes.
     - name: Release notes
       id: notes
       env:
@@ -258,3 +329,14 @@ jobs:
           echo "::warning::The release notes script failed: GitHub's generated notes are used."
         fi
 
+    - name: Create GitHub release
+      uses: softprops/action-gh-release@v2
+      with:
+        # XenDroid-v<versionCode>-<sha>: parsed by updater/ReleaseTags.kt.
+        tag_name: XenDroid-v${{ github.run_number }}-${{ needs.apk.outputs.sha }}
+        name: Xendroid Mali ${{ needs.apk.outputs.sha }} (build ${{ github.run_number }})
+        target_commitish: ${{ github.sha }}
+        body_path: ${{ steps.notes.outputs.path }}
+        generate_release_notes: ${{ steps.notes.outputs.path == '' }}
+        files: ${{ needs.apk.outputs.apk }}
+        

@@ -33,6 +33,7 @@ object SettingsSchema {
             b("Vulkan", "vulkan_dynamic_rendering", "Dynamic rendering", true),
             b("Vulkan", "vulkan_avoid_geometry_shaders", "Avoid geometry shaders", true),
             b("Vulkan", "vulkan_depth_unorm24", "Native D24 depth", true),
+            b("Vulkan", "vulkan_bc_to_etc2", "Convert DXT1 to ETC2", true),
             b("Vulkan", "vulkan_in_pass_resolve", "In-pass EDRAM resolve", true),
             b("Vulkan", "vulkan_resolve_to_texture_promote", "Resolve-to-texture: promote", true),
             b("Vulkan", "vulkan_resolve_to_texture", "Resolve-to-texture: store", true),
@@ -41,7 +42,6 @@ object SettingsSchema {
             // reuse is on) picks edge's bitmask gate vs the content-hash gate for A/B.
             b("Vulkan", "vulkan_cache_texture_descriptors", "Cache texture descriptors", true),
             b("Vulkan", "vulkan_texture_descriptor_reuse_edge", "Texture descriptor gate: edge (off = hash)", false),
-            b("Vulkan", "vulkan_bc_to_etc2", "Convert DXT1 to ETC2", false),
         )),
 
         SettingsCategory("Video", listOf(
@@ -195,7 +195,7 @@ object SettingsSchema {
             // 'fake' fabricates a result (fastest; some effects may look slightly wrong);
             // 'fast'/'fast-alt' issue async queries without stalling; 'strict' stalls the
             // command thread until the GPU answers. Live (SetZPDMode) -- no relaunch needed.
-            l("GPU", "occlusion_query", "Occlusion query mode", "fast",
+            l("GPU", "occlusion_query", "Occlusion query mode", "fast-alt",
                 "fake" to "Fake (no GPU query, fastest)", "fast" to "Fast (async query, no stall)",
                 "fast-alt" to "Fast-alt (async, precise zeros)", "strict" to "Strict (real query, stalls)"),
             // Mid-frame command-buffer split: end+submit every N draws so the GPU overlaps
@@ -253,6 +253,10 @@ object SettingsSchema {
             b("CPU", "break_condition_truncate", "Break condition truncate", true),
             b("CPU", "clock_source_raw", "Clock source raw", false),
             b("CPU", "break_on_unimplemented_instructions", "Break on unimplemented instructions", true),
+            // NOTE: your original paste cut off mid-line here ("break_on_star"). Restored as
+            // break_on_start to match the key SettingCatalog.kt already lists
+            // (e("CPU|break_on_start", X)) -- PLEASE VERIFY this one line (title/default) against
+            // your actual file; everything else in this file is exactly what you provided.
             b("CPU", "break_on_start", "Break on start", false),
         )),
 
@@ -290,7 +294,7 @@ object SettingsSchema {
             i("Console", "xmp_default_volume", "XMP default volume", 70, 0, 100),
             b("APU", "ffmpeg_verbose", "FFmpeg verbose", false),
             i("APU", "apu_max_queued_frames", "Max queued frames", 8, 4, 64),
-            i("APU", "apu_aaudio_buffer_bursts", "Audio buffer depth", 4, 2, 8),
+            i("APU", "apu_aaudio_buffer_bursts", "Audio buffer depth", 2, 2, 8),
             // 15j: grows after underruns, back to the depth above after quiet stretches.
             b("APU", "apu_aaudio_adaptive_buffer", "Adaptive audio buffer", false),
             b("APU", "enable_xmp", "Enable XMP", true),
@@ -318,7 +322,6 @@ object SettingsSchema {
         "GPU|anisotropic_override",
         "Console|widescreen", "Console|internal_display_resolution",
         "Vulkan|vulkan_lib_path",
-        "Vulkan|vulkan_bc_to_etc2",
         "HID|show_touch_overlay", "HID|left_stick_deadzone_percentage", "HID|right_stick_deadzone_percentage",
         "UI|android_soft_keyboard", "UI|android_message_box",
         "UI|show_achievement_notification",

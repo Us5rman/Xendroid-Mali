@@ -1,10 +1,17 @@
 #version 450
 
-/* BC1 (DXT1) -> ETC2 RGB8A1 transcoder, one 4x4 block per invocation, in place.
+/* BC1-BC5 (DXT1, DXT3, DXT5, DXT5A, DXN) -> ETC2 / EAC transcoder, one 4x4
+ * block per invocation, in place.
  *
- * The block fitting code comes from the BC1 -> ETC2 shader of panvk-kbase-android
- * (Mesa PanVK for Mali, MIT license); only the buffer access and the entry point
- * were rewritten for Xenia's texture loading buffer.
+ * The block fitting and the EAC alpha code come from the transcoding shaders of
+ * panvk-kbase-android the buffer access and
+ * the entry point were rewritten for Xenia's texture loading buffer.
+ *
+ * mode 0: BC1 -> ETC2 RGB8A1       (8 bytes)
+ * mode 1: BC2 -> ETC2 RGBA8        (16 bytes)
+ * mode 2: BC3 -> ETC2 RGBA8        (16 bytes)
+ * mode 3: BC4 -> EAC R11           (8 bytes)
+ * mode 4: BC5 -> EAC RG11          (16 bytes)
  */
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -14,6 +21,12 @@ layout(set = 0, binding = 0, std430) buffer BlockData
    uint data[];
 } blocks;
 
+/* BC4 endpoint pair -> EAC base, multiplier and table. */
+layout(set = 1, binding = 0, std430) readonly buffer EacTable
+{
+   uint data[];
+} lut;
+
 layout(push_constant) uniform Registers
 {
    uint base_word;      /* First block of the level, in 32-bit words. */
@@ -22,10 +35,12 @@ layout(push_constant) uniform Registers
    uint width_blocks;
    uint height_blocks;
    uint depth;
+   uint mode;
 } registers;
 
 #define VK_FORMAT_BC1_RGBA_UNORM_BLOCK 133
 #define VK_FORMAT_BC1_RGBA_SRGB_BLOCK 134
+#define VK_FORMAT_BC3_UNORM_BLOCK 137
 
 const vec2 ETAB[8] = vec2[8](vec2(2, 8), vec2(5, 17), vec2(9, 29), vec2(13, 42),
                              vec2(18, 60), vec2(24, 80), vec2(33, 106), vec2(47, 183));
@@ -308,6 +323,155 @@ uvec2 bc1_to_etc(uvec2 s, int format, bool four)
    return uvec2(bswap(hdr), bswap(pix_bits(idx, codes, flip, codes1)));
 }
 
+const ivec4 EAC_NEG[16] = ivec4[16](
+    ivec4(-3, -6, -9, -15), ivec4(-3, -7, -10, -13), ivec4(-2, -5, -8, -13), ivec4(-2, -4, -6, -13),
+    ivec4(-3, -6, -8, -12), ivec4(-3, -7, -9, -11), ivec4(-4, -7, -8, -11), ivec4(-3, -5, -8, -11),
+    ivec4(-2, -6, -8, -10), ivec4(-2, -5, -8, -10), ivec4(-2, -4, -8, -10), ivec4(-2, -5, -7, -10),
+    ivec4(-3, -4, -7, -10), ivec4(-1, -2, -3, -10), ivec4(-4, -6, -8, -9), ivec4(-3, -5, -7, -9));
+const ivec4 EAC_POS[16] = ivec4[16](
+    ivec4(2, 5, 8, 14), ivec4(2, 6, 9, 12), ivec4(1, 4, 7, 12), ivec4(1, 3, 5, 12),
+    ivec4(2, 5, 7, 11), ivec4(2, 6, 8, 10), ivec4(3, 6, 7, 10), ivec4(2, 4, 7, 10),
+    ivec4(1, 5, 7, 9), ivec4(1, 4, 7, 9), ivec4(1, 3, 7, 9), ivec4(1, 4, 6, 9),
+    ivec4(2, 3, 6, 9), ivec4(0, 1, 2, 9), ivec4(3, 5, 7, 8), ivec4(2, 4, 6, 8));
+
+uint eac_nearest(float p, vec4 vn, vec4 vp)
+{
+    vec4 a = abs(vn - p), b = abs(vp - p);
+    uint j = 0u; float e = a.x;
+    if (a.y < e) { e = a.y; j = 1u; }
+    if (a.z < e) { e = a.z; j = 2u; }
+    if (a.w < e) { e = a.w; j = 3u; }
+    if (b.x < e) { e = b.x; j = 4u; }
+    if (b.y < e) { e = b.y; j = 5u; }
+    if (b.z < e) { e = b.z; j = 6u; }
+    if (b.w < e) { j = 7u; }
+    return j;
+}
+
+/* 8-bit EAC alpha block for 16 texel alphas (4 per word, texel i = y*4+x).
+ * The base/multiplier/table come from the BC4 table entry for eight levels
+ * spanning the block's alpha range (8-bit EAC levels are the 11-bit ones
+ * scaled by 255/2047 * 8 = 0.9966); a flat block is encoded exactly. */
+uvec2 alpha_to_eac8(uvec4 a)
+{
+    uint lo = 255u, hi = 0u;
+    for (uint i = 0u; i < 16u; i++) {
+        const uint v = (a[i >> 2u] >> (8u * (i & 3u))) & 0xffu;
+        lo = min(lo, v); hi = max(hi, v);
+    }
+    uint base, m, tab;
+    if (lo == hi) {
+        base = lo; m = 1u; tab = 13u;   /* table 13 has a 0 modifier (code 4) */
+    } else {
+        const uint prm = lut.data[hi | lo << 8u] & 0xffffu;
+        base = prm & 0xffu; m = (prm >> 8u) & 0xfu; tab = prm >> 12u;
+    }
+    const vec4 vn = clamp(vec4(int(base) + EAC_NEG[tab] * int(m)), 0.0, 255.0);
+    const vec4 vp = clamp(vec4(int(base) + EAC_POS[tab] * int(m)), 0.0, 255.0);
+    uint ih = 0u, il = 0u;
+    for (uint i = 0u; i < 16u; i++) {
+        const uint v = eac_nearest(float((a[i >> 2u] >> (8u * (i & 3u))) & 0xffu), vn, vp);
+        const uint pos = 45u - 3u * ((i & 3u) * 4u + (i >> 2u));
+        if (pos >= 32u) ih |= v << (pos - 32u);
+        else if (pos + 3u <= 32u) il |= v << pos;
+        else { il |= v << pos; ih |= v >> (32u - pos); }
+    }
+    return uvec2(base | ((m << 4u | tab) << 8u) | ((ih >> 8u) & 0xffu) << 16u | (ih & 0xffu) << 24u,
+                 (il >> 24u) | ((il >> 16u) & 0xffu) << 8u | ((il >> 8u) & 0xffu) << 16u | (il & 0xffu) << 24u);
+}
+
+/* BC2 explicit 4-bit alpha -> 16 8-bit alphas. */
+uvec4 bc2_alpha(uvec2 w)
+{
+    uvec4 r;
+    for (uint q = 0u; q < 4u; q++) {
+        const uint h = (w[q >> 1u] >> (16u * (q & 1u))) & 0xffffu;
+        uint o = 0u;
+        for (uint k = 0u; k < 4u; k++)
+            o |= (((h >> (4u * k)) & 15u) * 17u) << (8u * k);
+        r[q] = o;
+    }
+    return r;
+}
+
+/* BC3 alpha (a BC4 block) -> 16 8-bit alphas, D3D palette rounding. */
+uvec4 bc3_alpha(uvec2 w)
+{
+    const uint a0 = w.x & 0xffu, a1 = (w.x >> 8u) & 0xffu;
+    const uint lo = (w.x >> 16u) | (w.y << 16u), hi = w.y >> 16u;
+    uvec4 r = uvec4(0u);
+    for (uint i = 0u; i < 16u; i++) {
+        const uint b = 3u * i;
+        const uint k = b + 3u <= 32u ? (lo >> b) & 7u : b >= 32u ? (hi >> (b - 32u)) & 7u : ((lo >> b) | (hi << (32u - b))) & 7u;
+        uint v;
+        if (k < 2u) v = k == 0u ? a0 : a1;
+        else if (a0 > a1) v = ((a0 * (8u - k) + a1 * (k - 1u) + 3u) * 9363u) >> 16u;
+        else if (k > 5u) v = k == 6u ? 0u : 255u;
+        else v = ((a0 * (6u - k) + a1 * (k - 1u) + 2u) * 13108u) >> 16u;
+        r[i >> 2u] |= v << (8u * (i & 3u));
+    }
+    return r;
+}
+
+/* One BC4 block (two words) -> one EAC R11 block (two words, memory order),
+ * unsigned. BC4 and EAC R11 both have eight levels per block. */
+uvec2 bc4_to_eac(uvec2 s)
+{
+    const uint key = s.x & 0xffffu;
+    const uint prm = lut.data[key] & 0xffffu;
+    const int m = int((prm >> 8u) & 0xfu);
+    const uint tab = prm >> 12u;
+
+    const uint a0 = s.x & 0xffu, a1 = (s.x >> 8u) & 0xffu;
+    uvec4 qa, qb;
+    if (a0 > a1) {
+        qa = uvec4(a0, a1, ((a0 * 6u + a1 + 3u) * 9363u) >> 16u, ((a0 * 5u + a1 * 2u + 3u) * 9363u) >> 16u);
+        qb = uvec4(((a0 * 4u + a1 * 3u + 3u) * 9363u) >> 16u, ((a0 * 3u + a1 * 4u + 3u) * 9363u) >> 16u,
+                   ((a0 * 2u + a1 * 5u + 3u) * 9363u) >> 16u, ((a0 + a1 * 6u + 3u) * 9363u) >> 16u);
+    } else {
+        qa = uvec4(a0, a1, ((a0 * 4u + a1 + 2u) * 13108u) >> 16u, ((a0 * 3u + a1 * 2u + 2u) * 13108u) >> 16u);
+        qb = uvec4(((a0 * 2u + a1 * 3u + 2u) * 13108u) >> 16u, ((a0 + a1 * 4u + 2u) * 13108u) >> 16u, 0u, 255u);
+    }
+    const vec4 pa = vec4(qa) * (2047.0 / 255.0);
+    const vec4 pb = vec4(qb) * (2047.0 / 255.0);
+    const int base = int(prm & 0xffu) * 8 + 4;
+    const vec4 vn = clamp(vec4(base + EAC_NEG[tab] * (m * 8)), 0.0, 2047.0);
+    const vec4 vp = clamp(vec4(base + EAC_POS[tab] * (m * 8)), 0.0, 2047.0);
+
+    /* EAC code for each BC4 palette entry, 3 bits each. */
+    const uint pid = eac_nearest(pa.x, vn, vp) | eac_nearest(pa.y, vn, vp) << 3u |
+                     eac_nearest(pa.z, vn, vp) << 6u | eac_nearest(pa.w, vn, vp) << 9u |
+                     eac_nearest(pb.x, vn, vp) << 12u | eac_nearest(pb.y vn, vp) << 15u |
+                     eac_nearest(pb.z, vn, vp) << 18u | eac_nearest(pb.w, vn, vp) << 21u;
+
+    /* BC4 indices: texel i = y * 4 + x at bit 16 + 3i. EAC indices: a 48-bit
+     * big-endian field, texel (x, y) in slot x * 4 + y, most significant
+     * slot first. */
+    const uint lo = (s.x >> 16u) | (s.y << 16u), hi = s.y >> 16u;
+    uint ih = 0u, il = 0u;
+    for (uint i = 0u; i < 16u; i++) {
+        const uint b = 3u * i;
+        const uint k = b + 3u <= 32u ? (lo >> b) & 7u :
+                       b >= 32u ? (hi >> (b - 32u)) & 7u :
+                       ((lo >> b) | (hi << (32u - b))) & 7u;
+        const uint v = (pid >> (3u * k)) & 7u;
+        const uint pos = 45u - 3u * ((i & 3u) * 4u + (i >> 2u));
+        if (pos >= 32u)
+            ih |= v << (pos - 32u);
+        else if (pos + 3u <= 32u)
+            il |= v << pos;
+        else {
+            il |= v << pos;
+            ih |= v >> (32u - pos);
+        }
+    }
+    return uvec2((prm & 0xffu) | ((uint(m) << 4u | tab) << 8u) |
+                    ((ih >> 8u) & 0xffu) << 16u | (ih & 0xffu) << 24u,
+                 (il >> 24u) | ((il >> 16u) & 0xffu) << 8u |
+                    ((il >> 8u) & 0xffu) << 16u | (il & 0xffu) << 24u);
+}
+
+
 void main()
 {
    const uint bx = gl_GlobalInvocationID.x;
@@ -316,9 +480,37 @@ void main()
    if (bx >= registers.width_blocks || by >= registers.height_blocks || bz >= registers.depth)
       return;
 
-   const uint word = registers.base_word + bz * registers.slice_words + by * registers.row_words + bx * 2u;
-   const uvec2 etc = bc1_to_etc(uvec2(blocks.data[word], blocks.data[word + 1u]),
-                                VK_FORMAT_BC1_RGBA_UNORM_BLOCK, false);
-   blocks.data[word] = etc.x;
-   blocks.data[word + 1u] = etc.y;
+   const uint mode = registers.mode;
+   const uint nw = (mode == 0u || mode == 3u) ? 2u : 4u;
+   const uint w = registers.base_word + bz * registers.slice_words + by * registers.row_words + bx * nw;
+
+   if (mode == 0u) {
+      const uvec2 r = bc1_to_etc(uvec2(blocks.data[w], blocks.data[w + 1u]),
+                                 VK_FORMAT_BC1_RGBA_UNORM_BLOCK, false);
+      blocks.data[w] = r.x;
+      blocks.data[w + 1u] = r.y;
+   } else if (mode <= 2u) {
+      /* ETC2 RGBA8: EAC alpha block, then the colour block (BC2/BC3 colour
+       * is always in 4-colour mode). */
+      const uvec2 aw = uvec2(blocks.data[w], blocks.data[w + 1u]);
+      const uvec4 al = mode == 1u ? bc2_alpha(aw) : bc3_alpha(aw);
+      const uvec2 a = alpha_to_eac8(al);
+      const uvec2 c = bc1_to_etc(uvec2(blocks.data[w + 2u], blocks.data[w + 3u]),
+                                 VK_FORMAT_BC3_UNORM_BLOCK, true);
+      blocks.data[w] = a.x;
+      blocks.data[w + 1u] = a.y;
+      blocks.data[w + 2u] = c.x;
+      blocks.data[w + 3u] = c.y;
+   } else {
+      const uvec2 r = bc4_to_eac(uvec2(blocks.data[w], blocks.data[w + 1u]));
+      uvec2 g = uvec2(0u);
+      if (mode == 4u)
+         g = bc4_to_eac(uvec2(blocks.data[w + 2u], blocks.data[w + 3u]));
+      blocks.data[w] = r.x;
+      blocks.data[w + 1u] = r.y;
+      if (mode == 4u) {
+         blocks.data[w + 2u] = g.x;
+         blocks.data[w + 3u] = g.y;
+      }
+   }
 }

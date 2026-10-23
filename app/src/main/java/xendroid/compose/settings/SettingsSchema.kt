@@ -33,7 +33,7 @@ object SettingsSchema {
             b("Vulkan", "vulkan_dynamic_rendering", "Dynamic rendering", true),
             b("Vulkan", "vulkan_avoid_geometry_shaders", "Avoid geometry shaders", true),
             b("Vulkan", "vulkan_depth_unorm24", "Native D24 depth", true),
-            b("Vulkan", "vulkan_bc_to_etc2", "ETC2 transcode", true),
+            b("Vulkan", "vulkan_bc_to_etc2", "Transcode Textures", true),
             b("Vulkan", "vulkan_in_pass_resolve", "In-pass EDRAM resolve", true),
             b("Vulkan", "vulkan_resolve_to_texture_promote", "Resolve-to-texture: promote", true),
             b("Vulkan", "vulkan_resolve_to_texture", "Resolve-to-texture: store", true),

@@ -25,7 +25,7 @@ object SettingDescriptions {
         "vulkan_allow_reverse_z" to "Passes reverse depth ranges (inverse-Z) directly to the driver. Turn off if the driver draws them wrong",
         "stack_size_multiplier_hack" to "Hack for games with setjmp/longjmp problems",
         "vulkan_dynamic_rendering" to "Uses VK_KHR_dynamic_rendering instead of traditional render passes. May improve or worsen performance depending on the driver",
-        "vulkan_bc_to_etc2" to "Transcode Xbox 360 texture formats to ETC2 (native texture format supported by Mali) causing less vram usage and less stutters potentially increasing FPS",
+        "vulkan_bc_to_etc2" to "Transcode Xbox 360 texture formats to native texture format supported by Mali causing less vram usage and less stutters potentially increasing FPS",
         "vulkan_avoid_geometry_shaders" to "On tile-based GPUs such as Mali, routes point sprites and quad lists through cheaper paths. Read when the GPU starts",
         "vulkan_depth_unorm24" to "Uses the D24_UNORM_S8_UINT format when the driver supports it. Off forces the float32 emulation instead",
         "achievement_notification_position_by_game" to "Off, the achievement notification always shows at the bottom centre",

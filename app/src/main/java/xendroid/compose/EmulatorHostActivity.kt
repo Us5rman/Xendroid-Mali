@@ -925,7 +925,7 @@ class EmulatorHostActivity : ComponentActivity(), SurfaceHolder.Callback {
         val frameGeneration = when {
             !fg.requested -> getString(R.string.menu_off)
             fg.engine == 1 -> "LSFG ×${fg.multiplier}"
-            else -> "Win-FG"
+            else -> "ZeroFG"
         }
         val limit = fpsLimitState.intValue.let { if (it == 0) getString(R.string.menu_unlimited) else it.toString() } +
             " · " + getString(R.string.panel_screen_hz, currentOutputHz().roundToInt().toString())

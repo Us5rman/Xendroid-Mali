@@ -49,8 +49,8 @@
     <string name="menu_display_fill">Display · Fill/crop</string>
     <string name="menu_display_stretch">Display · Stretch</string>
     <string name="menu_display_integer">Display · Integer</string>
-    <string name="menu_winfg">Win-FG 2× · %1$s</string>
-    <string name="menu_winfg_preset">Win-FG preset · %1$s</string>
+    <string name="menu_winfg">ZeroFG · %1$s</string>
+    <string name="menu_winfg_preset">ZeroFG preset · %1$s</string>
     <string name="menu_preset_quality">Quality</string>
     <string name="menu_preset_balanced">Balanced</string>
     <string name="menu_preset_performance">Performance</string>

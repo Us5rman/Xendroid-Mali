@@ -164,7 +164,7 @@ jobs:
         key: ndk${{ env.ANDROID_NDK_VERSION }}-arm64
         max-size: 2G
 
-    - name: Fetch ZeroFG
+    - name: Fetch Winmalis ZeroFG
       run: |
         git clone --depth 1 https://github.com/GunaCharanTeja/WinlatorMali.git "$RUNNER_TEMP/winlator-mali"
         rm -rf emulator-core/src/main/cpp/third_party/zerofg

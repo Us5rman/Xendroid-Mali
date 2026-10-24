@@ -18,14 +18,10 @@
 
 ---
 
-**Xendroid+** is an Xbox 360 emulator for Android, created and maintained by
-**[phforner0](https://github.com/phforner0)**. It continues the XenDroid project and
-builds on [Xenia](https://github.com/xenia-project/xenia), with an interface
-redesigned for phones, tablets and controllers, per-game tuning applied automatically,
-and performance and accuracy work measured frame by frame on real hardware.
+**Xendroid-Mali** is an Xbox 360 emulator for Mali GPU's. Its based on the XenDroid+ project [Xenia](https://github.com/xenia-project/xenia)
 
 > [!NOTE]
-> Xendroid+ is experimental. How a game runs depends on the game, the device and the
+> Xendroid-Mali is experimental. How a game runs depends on the game, the device and the
 > GPU driver: some titles run well, others still show glitches or do not boot.
 
 ## Highlights
@@ -68,11 +64,11 @@ and performance and accuracy work measured frame by frame on real hardware.
 - **Performance HUD** (FPS, frame time, CPU, GPU, RAM, temperatures) and per-game
   frame-rate limits (unlimited, or 30 to 120 FPS).
 - **Output scaling and sharpening**, including Snapdragon Game Super Resolution.
-- **Driver manager** for Adreno/Turnip drivers, global or per game, with SHA-256
+- **Driver manager** for PanVK/Turnip drivers, global or per game, with SHA-256
   checks.
 - **Play history** with frame-time percentiles, a diagnostics bundle to share,
   local compatibility notes and community settings profiles.
-- **Frame generation** (experimental, off by default): Win-FG and LSFG (with your own
+- **Frame generation** (experimental, off by default): ZeroFG and LSFG (with your own
   `Lossless.dll`) turn a 30 fps game into 60 on the screen, and the HUD shows both
   rates.
 
@@ -103,22 +99,20 @@ The measurements, methods and optimization plans are in
 ## Requirements
 
 - Android 10 or newer on 64-bit ARM (arm64-v8a).
-- A Vulkan GPU. Adreno 7xx and 8xx with the Turnip driver are the main target; a
-  Snapdragon 8 Gen 2 or newer is recommended.
+- A Vulkan GPU. a Mali G615 MC6 or newer is recommended.
 - Your own Xbox 360 games, dumped from discs or consoles you own: disc images (ISO),
   ZAR archives or Games on Demand (GOD) packages.
 
 ## Getting started
 
-1. Install the Xendroid+ APK.
-2. Open it and follow the first-run assistant: pick your games folder, or let it
-   create one along with folders for title updates and DLC.
+1. Install the Xendroid-Mali APK.
+2. Open it and follow the first-run assistant: pick your games folder, or let it create one along with folders for title updates and DLC.
 3. Choose a game in the library. While playing, open the in-game menu from the touch
    handle, or with Back/Guide on a controller.
 
 ## Building from source
 
-Xendroid+ builds with JDK 21, the Android SDK and NDK, and the SPIR-V shader
+Xendroid-Mali builds with JDK 21, the Android SDK and NDK, and the SPIR-V shader
 toolchain. The full setup for Linux and Windows hosts is in [BUILD.md](BUILD.md):
 
 ```sh
@@ -139,30 +133,15 @@ toolchain. The full setup for Linux and Windows hosts is in [BUILD.md](BUILD.md)
 
 - **Xendroid+**: created and maintained by **[phforner0](https://github.com/phforner0)**.
 - **XenDroid**, the original Android port, by **[rfandango](https://github.com/rfandango)**.
-- **[Xenia](https://github.com/xenia-project/xenia)** and Xenia Canary, the Xbox 360
-  emulator research project the emulation core comes from.
+- **[Xenia](https://github.com/xenia-project/xenia)** and Xenia Canary, the Xbox 360 emulator research project the emulation core comes from.
 - Frame generation, fonts, upscaling and the other third-party components keep their
   own licenses, listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 ## License
 
-Xendroid+'s own code is Copyright (C) 2026 phforner0 and the Xendroid+ contributors,
+Xendroid-Mali's own code is Copyright (C) 2026 phforner0 and the Xendroid+ contributors,
 licensed under the [GNU Affero General Public License v3.0 or later](LICENSE). Anyone
 who distributes a modified version, or lets people use one over a network, has to
 publish its source code under the same license. Code that came from Xenia, XenDroid and
 the third-party components keeps its own license; see
 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
-
-## Legal
-
-Xendroid+ is a non-commercial, open-source project for research, software development
-and performance testing. It is not affiliated with or endorsed by Microsoft; Xbox and
-Xbox 360 are trademarks of Microsoft Corporation.
-
-The project does not condone piracy. No games, disc images, firmware, system files or
-keys are included or distributed. Use only backups of games you own, dumped from
-hardware you own.
-
-## Community
-
-Join the discussion on [Discord](https://discord.gg/AT8Bswv62).

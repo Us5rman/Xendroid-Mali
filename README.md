@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-<p align="center"><strong>Xbox 360 emulation on Android, tuned for Snapdragon and Adreno.</strong></p>
+<p align="center"><strong>Xbox 360 emulation on Android, tuned for Mali.</strong></p>
 
 <p align="center">
   <img alt="Android 10+" src="https://img.shields.io/badge/Android-10%2B-3DBB2E?logo=android&logoColor=white">

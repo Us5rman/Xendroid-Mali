@@ -108,6 +108,9 @@ add_subdirectory(third_party/lsfg)
 target_link_libraries(xenia-ui-vulkan PRIVATE xendroid-lsfg)
 target_link_libraries(emu PRIVATE xendroid-lsfg)
 # ZeroFG frame generation: the workflow puts its sources into third_party/zerofg.
+# Use the shaders that ship compiled with it; the shader tools of this build make it
+# compile them from source otherwise, which leaves out a Mali one.
+set(ZEROFG_PREBUILT_SHADERS ON CACHE BOOL "Use the prebuilt ZeroFG shaders" FORCE)
 add_subdirectory(third_party/zerofg EXCLUDE_FROM_ALL)
 target_link_libraries(xenia-ui-vulkan PRIVATE zerofg::zerofg)
 find_program(XENDROID_GLSLANG glslangValidator REQUIRED)

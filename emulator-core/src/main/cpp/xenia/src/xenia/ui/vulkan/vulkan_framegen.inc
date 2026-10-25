@@ -158,9 +158,12 @@ constexpr VkImageUsageFlags kZeroFgSourceUsage =
     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
     VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+// An output that isn't A2B10G10R10 is written through ZeroFG's own image and blitted,
+// which needs the transfer destination usage.
 constexpr VkImageUsageFlags kZeroFgOutputUsage =
     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+    VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
+    VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
 // ZeroFG (Apache-2.0) in place of Win-FG. Returns null where it can't run (Vulkan 1.3
 // with synchronization2 is needed, and a picture size its grid accepts), so the caller
@@ -352,7 +355,7 @@ bool VulkanPresenter::PrepareGeneratedFrame(VkCommandBuffer cmd,
       return true;
     }
     VkImageMemoryBarrier before{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    before.image = context.generated->image(); before.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    before.image = context.generated->image(); before.image = context.generated->image(); before.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     before.newLayout = VK_IMAGE_LAYOUT_GENERAL; before.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
     before.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT; before.srcQueueFamilyIndex = before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     before.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
@@ -401,7 +404,7 @@ bool VulkanPresenter::TakeInGuestOutput(VkCommandBuffer cmd,
     context.current = GuestOutputImage::Create(vulkan_device_, extent.width, extent.height, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
     context.generated = GuestOutputImage::Create(vulkan_device_, extent.width, extent.height, VK_FORMAT_R8G8B8A8_UNORM,
-        VK_IMAGE_USAGE_STORAGE_BIT);
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     context.have_previous = false; context.current_initialized = false; context.previous_initialized = false; context.generated_initialized = false;
     context.preset = -1;
     if (context.lsfg_engine) context.lsfg_engine->forgetTargets();

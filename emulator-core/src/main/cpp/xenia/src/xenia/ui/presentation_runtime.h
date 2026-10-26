@@ -208,9 +208,15 @@ class FrameGenerationSchedule {
     return cycle;
   }
 
-  // When output `index` (1-based; `multiplier` is the real frame) is due.
+  // When output `index` (1-based; `multiplier` is the real frame) is due: counted
+  // from the real frame that STARTED this cycle (begin_ns, already in the past by the
+  // time Begin() returns), so index 1 lands step_ns AFTER it, not at it. With
+  // multiplier 2 (ZeroFG, Win-FG) that one synthetic output sits exactly halfway to
+  // the next real frame: 15 ms after a real frame if the last two real frames were
+  // 30 ms apart. index == multiplier lands exactly one full real-frame gap later,
+  // which is also where the following cycle naturally begins.
   static int64_t Deadline(const Cycle& cycle, int index) {
-    return cycle.begin_ns + cycle.step_ns * (index - 1);
+    return cycle.begin_ns + cycle.step_ns * index;
   }
 
   // A synthetic output whose slot passed by more than half a step is skipped

@@ -1,15 +1,5 @@
 name: Xendroid-Mali
 
-# Android APK build (arm64-v8a).
-# - Only runs on pull requests or manual workflow triggers.
-# Signing (repository secrets, all optional):
-# - release key: ANDROID_KEYSTORE_BASE64, KEY_ALIAS, KEYSTORE_PASSWORD,
-#   KEY_PASSWORD (defaults to the keystore password). Needed for signing releases.
-# - test key, used for test builds before the release key: TEST_KEYSTORE_BASE64,
-#   TEST_KEY_ALIAS, TEST_KEYSTORE_PASSWORD (also the key password). With the key
-#   of the test builds already on the phone, CI builds install over them.
-# Without a key the APK is signed with a temporary key made for the run: it
-# installs, but not over a build signed with another key.
 on:
   pull_request:
     branches: [main]
@@ -38,7 +28,6 @@ permissions:
 
 concurrency:
   group: xendroid-${{ github.event.pull_request.number || github.ref }}
-  # A new push to a pull request replaces its running build.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -58,7 +47,6 @@ jobs:
       LANG: C.UTF-8
       LC_ALL: C.UTF-8
       GRADLE_OPTS: -Dorg.gradle.daemon=false
-      # Native compile cache (emulator-core/build.gradle adds the launcher).
       USE_CCACHE: 'true'
       CCACHE_COMPILERCHECK: content
 
@@ -100,14 +88,13 @@ jobs:
           echo "package=$package"
           echo "package_args=$package_args"
         } >> "$GITHUB_OUTPUT"
-        # Paths inside the container (github.workspace is the host path).
-        echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         echo "Building $package as $name.apk"
 
     - name: Install system tools
       run: |
         apt-get update -qq
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends           ninja-build python3 glslang-tools spirv-tools ccache advancecomp zip unzip
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+          ninja-build python3 glslang-tools spirv-tools ccache advancecomp zip unzip
 
     - name: Set up Gradle
       uses: gradle/actions/setup-gradle@v4
@@ -125,7 +112,8 @@ jobs:
     - name: Install Android SDK packages
       run: |
         yes | sdkmanager --licenses > /dev/null
-        for package in "ndk;$ANDROID_NDK_VERSION" "cmake;$CMAKE_VERSION"                        "build-tools;$BUILD_TOOLS_VERSION" "platforms;android-35"; do
+        for package in "ndk;$ANDROID_NDK_VERSION" "cmake;$CMAKE_VERSION" \
+                       "build-tools;$BUILD_TOOLS_VERSION" "platforms;android-35"; do
           dir="$ANDROID_SDK_ROOT/$(echo "$package" | tr ';' '/')"
           [ -d "$dir" ] || sdkmanager "$package" > /dev/null
         done
@@ -152,7 +140,11 @@ jobs:
         PACKAGE_ARGS: ${{ steps.cfg.outputs.package_args }}
       run: |
         chmod +x gradlew
-        ./gradlew --console=plain --build-cache --parallel           -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"           -PgitHash="$SHA" -PxendroidVersionCode="$GITHUB_RUN_NUMBER" $PACKAGE_ARGS :app:assembleRelease
+        # Start at 101+ and increment sequentially from GitHub run number
+        SAFE_VERSION_CODE=$((100 + GITHUB_RUN_NUMBER))
+        ./gradlew --console=plain --build-cache --parallel \
+          -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
+          -PgitHash="$SHA" -PxendroidVersionCode="$SAFE_VERSION_CODE" $PACKAGE_ARGS :app:assembleRelease
         ccache -s || true
         df -h "$GITHUB_WORKSPACE" || true
 
@@ -222,9 +214,9 @@ jobs:
         "$bt/apksigner" verify --print-certs "$NAME.apk" | grep -E 'Signer #1 certificate (DN|SHA-256)'
         {
           echo "### $NAME.apk"
-          echo "- Package: \\`$PACKAGE\\`"
+          echo "- Package: \`$PACKAGE\`"
           echo "- Signed with the $signed_with key"
-          echo "- Size: $(du -h "$NAME.apk" | cut -f1), SHA-256: \\`$(sha256sum "$NAME.apk" | cut -d' ' -f1)\\`"
+          echo "- Size: $(du -h "$NAME.apk" | cut -f1), SHA-256: \`$(sha256sum "$NAME.apk" | cut -d' ' -f1)\`"
         } >> "$GITHUB_STEP_SUMMARY"
         echo "apk=$NAME.apk" >> "$GITHUB_OUTPUT"
         echo "signed_with=$signed_with" >> "$GITHUB_OUTPUT"

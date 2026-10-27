@@ -1,11 +1,7 @@
 name: Xendroid-Mali
 
 # Android APK build (arm64-v8a).
-# - Pull requests into main (including the claude/* branches of cloud
-#   sessions) and manual runs build the test package Xendroid.compose.Mali.opt:
-#   debuggable and installed alongside the regular app, the package the A/B
-#   tools in tools/ drive.
-# - Pushes to main build the regular package Xendroid.compose.Mali.
+# - Only runs on pull requests or manual workflow triggers.
 # Signing (repository secrets, all optional):
 # - release key: ANDROID_KEYSTORE_BASE64, KEY_ALIAS, KEYSTORE_PASSWORD,
 #   KEY_PASSWORD (defaults to the keystore password). Needed for signing releases.
@@ -15,18 +11,6 @@ name: Xendroid-Mali
 # Without a key the APK is signed with a temporary key made for the run: it
 # installs, but not over a build signed with another key.
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'performance-tests/**'
-      - 'tools/**'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/workflows/cache-cleanup.yml'
-      - '.github/workflows/checks.yml'
-      - '.github/workflows/pages.yml'
-      - 'website/**'
   pull_request:
     branches: [main]
     paths-ignore:
@@ -54,8 +38,7 @@ permissions:
 
 concurrency:
   group: xendroid-${{ github.event.pull_request.number || github.ref }}
-  # A new push to a pull request replaces its running build; main builds
-  # always finish.
+  # A new push to a pull request replaces its running build.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

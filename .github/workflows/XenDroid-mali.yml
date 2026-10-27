@@ -104,11 +104,6 @@ jobs:
         echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         echo "Building $package as $name.apk"
 
-    - name: List the BC shader files
-      run: |
-        find emulator-core -iname '*bc_etc*' -o -iname '*bc_eac*' | cat -A
-        git ls-files | grep -i 'bc_etc' | cat -A || true
-
     - name: Install system tools
       run: |
         apt-get update -qq

@@ -31,7 +31,7 @@ on:
           regular: Xendroid.compose.Mali
         type: choice
         options: [test, regular]
-        default: test
+        default: regular
 
 permissions:
   contents: read
@@ -107,8 +107,7 @@ jobs:
     - name: Install system tools
       run: |
         apt-get update -qq
-        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-          ninja-build python3 glslang-tools spirv-tools ccache advancecomp zip unzip
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends           ninja-build python3 glslang-tools spirv-tools ccache advancecomp zip unzip
 
     - name: Set up Gradle
       uses: gradle/actions/setup-gradle@v4
@@ -126,8 +125,7 @@ jobs:
     - name: Install Android SDK packages
       run: |
         yes | sdkmanager --licenses > /dev/null
-        for package in "ndk;$ANDROID_NDK_VERSION" "cmake;$CMAKE_VERSION" \
-                       "build-tools;$BUILD_TOOLS_VERSION" "platforms;android-35"; do
+        for package in "ndk;$ANDROID_NDK_VERSION" "cmake;$CMAKE_VERSION"                        "build-tools;$BUILD_TOOLS_VERSION" "platforms;android-35"; do
           dir="$ANDROID_SDK_ROOT/$(echo "$package" | tr ';' '/')"
           [ -d "$dir" ] || sdkmanager "$package" > /dev/null
         done
@@ -154,12 +152,7 @@ jobs:
         PACKAGE_ARGS: ${{ steps.cfg.outputs.package_args }}
       run: |
         chmod +x gradlew
-        # PACKAGE_ARGS holds several arguments (unquoted on purpose).
-        # The run number orders builds for the in-app updater (versionCode); the
-        # release tag below carries the same number.
-        ./gradlew --console=plain --build-cache --parallel \
-          -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
-          -PgitHash="$SHA" -PxendroidVersionCode="$GITHUB_RUN_NUMBER" $PACKAGE_ARGS :app:assembleRelease
+        ./gradlew --console=plain --build-cache --parallel           -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"           -PgitHash="$SHA" -PxendroidVersionCode="$GITHUB_RUN_NUMBER" $PACKAGE_ARGS :app:assembleRelease
         ccache -s || true
         df -h "$GITHUB_WORKSPACE" || true
 
@@ -180,9 +173,6 @@ jobs:
         set -eu
         bt="$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION"
         unsigned=$(ls app/build/outputs/apk/release/*.apk | head -n 1)
-        # Recompress every deflated entry with zopfli. resources.arsc has to stay
-        # stored (Android 11+ refuses a compressed one), so it is taken out first
-        # and put back stored. On any failure the Gradle APK is used as it is.
         before=$(stat -c %s "$unsigned")
         work="$RUNNER_TEMP/recompressed.apk"
         cp "$unsigned" "$work"
@@ -225,7 +215,6 @@ jobs:
           signed_with=temporary
           alias=ci
         fi
-        # Read by apksigner from the environment, never on the command line.
         export KEYSTORE_PASSWORD KEY_PASSWORD
         "$bt/apksigner" sign --ks "$keystore" --ks-key-alias "$alias" \
           --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \
@@ -233,9 +222,9 @@ jobs:
         "$bt/apksigner" verify --print-certs "$NAME.apk" | grep -E 'Signer #1 certificate (DN|SHA-256)'
         {
           echo "### $NAME.apk"
-          echo "- Package: \`$PACKAGE\`"
+          echo "- Package: \\`$PACKAGE\\`"
           echo "- Signed with the $signed_with key"
-          echo "- Size: $(du -h "$NAME.apk" | cut -f1), SHA-256: \`$(sha256sum "$NAME.apk" | cut -d' ' -f1)\`"
+          echo "- Size: $(du -h "$NAME.apk" | cut -f1), SHA-256: \\`$(sha256sum "$NAME.apk" | cut -d' ' -f1)\\`"
         } >> "$GITHUB_STEP_SUMMARY"
         echo "apk=$NAME.apk" >> "$GITHUB_OUTPUT"
         echo "signed_with=$signed_with" >> "$GITHUB_OUTPUT"

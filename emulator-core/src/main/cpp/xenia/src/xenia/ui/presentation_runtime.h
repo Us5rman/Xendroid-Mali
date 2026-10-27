@@ -63,6 +63,11 @@ struct PresentationRuntime {
   std::atomic<uint64_t> synthetic_slots{0};
   // Latest generation pass, -1 when the last one could not be timed (never a stale value).
   std::atomic<double> generation_gpu_ms{-1.0};
+  // The ENGINE'S OWN time within that pass (ZeroFG Interpolate / Win-FG record / LSFG
+  // generateInto only, barriers excluded): generation_gpu_ms minus this is roughly what
+  // the layout-transition barriers around it cost. -1 on a path that does not time it
+  // separately (see query_engine_pending in the Vulkan glue) or when unavailable.
+  std::atomic<double> generation_gpu_engine_ms{-1.0};
   // Cumulative per process; the app takes deltas per run. Relaxed: counters only.
   std::array<std::atomic<uint64_t>, kGenerationGpuBuckets> generation_gpu_histogram{};
   std::atomic<uint64_t> generation_gpu_unavailable{0};
@@ -95,6 +100,13 @@ inline void RecordGenerationGpu(PresentationRuntime& runtime, int64_t ns) {
   runtime.generation_gpu_ms.store(double(ns) / 1e6, std::memory_order_relaxed);
   const size_t bucket = std::min<size_t>(size_t(ns / kGenerationGpuBucketNs), kGenerationGpuBuckets - 1);
   runtime.generation_gpu_histogram[bucket].fetch_add(1, std::memory_order_relaxed);
+}
+
+// The engine-only sub-measurement (see generation_gpu_engine_ms). No histogram: it is
+// a diagnostic split of the pass RecordGenerationGpu already bucketed, not a second
+// independent measurement.
+inline void RecordGenerationEngineGpu(PresentationRuntime& runtime, int64_t ns) {
+  runtime.generation_gpu_engine_ms.store(ns < 0 ? -1.0 : double(ns) / 1e6, std::memory_order_relaxed);
 }
 
 struct OutputRectangle { int32_t x, y; uint32_t width, height; };
@@ -208,15 +220,9 @@ class FrameGenerationSchedule {
     return cycle;
   }
 
-  // When output `index` (1-based; `multiplier` is the real frame) is due: counted
-  // from the real frame that STARTED this cycle (begin_ns, already in the past by the
-  // time Begin() returns), so index 1 lands step_ns AFTER it, not at it. With
-  // multiplier 2 (ZeroFG, Win-FG) that one synthetic output sits exactly halfway to
-  // the next real frame: 15 ms after a real frame if the last two real frames were
-  // 30 ms apart. index == multiplier lands exactly one full real-frame gap later,
-  // which is also where the following cycle naturally begins.
+  // When output `index` (1-based; `multiplier` is the real frame) is due.
   static int64_t Deadline(const Cycle& cycle, int index) {
-    return cycle.begin_ns + cycle.step_ns * index;
+    return cycle.begin_ns + cycle.step_ns * (index - 1);
   }
 
   // A synthetic output whose slot passed by more than half a step is skipped

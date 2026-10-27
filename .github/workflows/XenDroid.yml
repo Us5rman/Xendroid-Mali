@@ -5,17 +5,15 @@ name: Xendroid-Mali
 #   sessions) and manual runs build the test package Xendroid.compose.Mali.opt:
 #   debuggable and installed alongside the regular app, the package the A/B
 #   tools in tools/ drive.
-# - Pushes to main build the regular package Xendroid.compose.Mali and, when
-#   the signing secrets are set, publish it as a GitHub release.
+# - Pushes to main build the regular package Xendroid.compose.Mali.
 # Signing (repository secrets, all optional):
 # - release key: ANDROID_KEYSTORE_BASE64, KEY_ALIAS, KEYSTORE_PASSWORD,
-#   KEY_PASSWORD (defaults to the keystore password). Needed for releases.
+#   KEY_PASSWORD (defaults to the keystore password). Needed for signing releases.
 # - test key, used for test builds before the release key: TEST_KEYSTORE_BASE64,
 #   TEST_KEY_ALIAS, TEST_KEYSTORE_PASSWORD (also the key password). With the key
 #   of the test builds already on the phone, CI builds install over them.
 # Without a key the APK is signed with a temporary key made for the run: it
-# installs, but not over a build signed with another key, and no release is
-# published.
+# installs, but not over a build signed with another key.
 on:
   push:
     branches: [main]
@@ -57,7 +55,7 @@ permissions:
 concurrency:
   group: xendroid-${{ github.event.pull_request.number || github.ref }}
   # A new push to a pull request replaces its running build; main builds
-  # (releases) always finish.
+  # always finish.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -237,7 +235,7 @@ jobs:
           alias=$KEY_ALIAS
           KEY_PASSWORD=${KEY_PASSWORD:-$KEYSTORE_PASSWORD}
         else
-          echo "::warning::No signing secrets set: signed with a temporary key, no release is published (see the header of XenDroid.yml)."
+          echo "::warning::No signing secrets set: signed with a temporary key (see header)."
           KEYSTORE_PASSWORD=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
           echo "::add-mask::$KEYSTORE_PASSWORD"
           KEY_PASSWORD=$KEYSTORE_PASSWORD
@@ -267,8 +265,6 @@ jobs:
     - name: Check APK packaging
       env:
         APK: ${{ steps.sign.outputs.apk }}
-      # arm64-only core with JNI_OnLoad, signed, license texts present, no DLL,
-      # shader cache, game image or profile data inside.
       run: python3 tools/check-apk.py "$APK" --aapt2 "$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS_VERSION/aapt2"
 
     - name: APK size breakdown
@@ -292,59 +288,4 @@ jobs:
         if-no-files-found: error
         retention-days: 14
         compression-level: 9
-
-  release:
-    name: GitHub release
-    needs: apk
-    if: >-
-      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-      needs.apk.outputs.signed_with == 'release'
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-      # The merged pull requests' descriptions, for their release notes.
-      pull-requests: read
-
-    steps:
-    # Before the download: checkout cleans the workspace.
-    - name: Checkout the release notes script
-      uses: actions/checkout@v4
-      with:
-        sparse-checkout: tools/release_notes.py
-        sparse-checkout-cone-mode: false
-
-    - name: Download APK
-      uses: actions/download-artifact@v4
-      with:
-        name: ${{ needs.apk.outputs.name }}
-
-    # The notes the merged pull requests wrote (tools/release_notes.py). If the script
-    # fails, the release still goes out, with GitHub's generated notes.
-    - name: Release notes
-      id: notes
-      env:
-        GH_TOKEN: ${{ github.token }}
-        TAG: XenDroid-v${{ github.run_number }}-${{ needs.apk.outputs.sha }}
-        APK: ${{ needs.apk.outputs.apk }}
-      run: |
-        if python3 tools/release_notes.py --repo "$GITHUB_REPOSITORY" --tag "$TAG" \
-            --sha "$GITHUB_SHA" --build "$GITHUB_RUN_NUMBER" --apk "$APK" \
-            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            > "$RUNNER_TEMP/release-notes.md"; then
-          echo "path=$RUNNER_TEMP/release-notes.md" >> "$GITHUB_OUTPUT"
-          cat "$RUNNER_TEMP/release-notes.md" >> "$GITHUB_STEP_SUMMARY"
-        else
-          echo "::warning::The release notes script failed: GitHub's generated notes are used."
-        fi
-
-    - name: Create GitHub release
-      uses: softprops/action-gh-release@v2
-      with:
-        # XenDroid-v<versionCode>-<sha>: parsed by updater/ReleaseTags.kt.
-        tag_name: XenDroid-v${{ github.run_number }}-${{ needs.apk.outputs.sha }}
-        name: Xendroid Mali ${{ needs.apk.outputs.sha }} (build ${{ github.run_number }})
-        target_commitish: ${{ github.sha }}
-        body_path: ${{ steps.notes.outputs.path }}
-        generate_release_notes: ${{ steps.notes.outputs.path == '' }}
-        files: ${{ needs.apk.outputs.apk }}
         

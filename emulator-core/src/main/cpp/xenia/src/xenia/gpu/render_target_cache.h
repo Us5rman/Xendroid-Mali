@@ -190,6 +190,24 @@ class RenderTargetCache {
     return draw_resolution_scale_x() > 1 || draw_resolution_scale_y() > 1;
   }
 
+  // Stage 1 (plumbing only): a render divisor, separate from the upscale factor
+  // above (which is bit-packed 1..7 into HostDepthStoreRenderTargetConstant and
+  // cannot represent a divisor). 1 = native, matching draw_resolution_scale_x/y's
+  // own "no scaling" value, so every call site here is a true no-op until Stage 2
+  // sets this from something other than 1 AND gives the EDRAM tile math and the
+  // resolve/copy shaders an actual sub-sampling path - neither exists yet. Until
+  // then IsDrawResolutionDownscaled() is always false and nothing reads these
+  // values for address or tile-size math anywhere in this class.
+  uint32_t draw_resolution_downscale_x() const {
+    return draw_resolution_downscale_x_;
+  }
+  uint32_t draw_resolution_downscale_y() const {
+    return draw_resolution_downscale_y_;
+  }
+  bool IsDrawResolutionDownscaled() const {
+    return draw_resolution_downscale_x() > 1 || draw_resolution_downscale_y() > 1;
+  }
+
   // Whether surfaces with this pitch render native per the scale threshold.
   // Compares the tile-aligned width, so it's a pure function of key fields.
   bool IsScaleNativeForPitch(uint32_t pitch_tiles_at_32bpp,
@@ -301,13 +319,19 @@ class RenderTargetCache {
  protected:
   RenderTargetCache(const RegisterFile& register_file, const Memory& memory,
                     TraceWriter* trace_writer, uint32_t draw_resolution_scale_x,
-                    uint32_t draw_resolution_scale_y)
+                    uint32_t draw_resolution_scale_y,
+                    uint32_t draw_resolution_downscale_x = 1,
+                    uint32_t draw_resolution_downscale_y = 1)
       : register_file_(register_file),
         draw_resolution_scale_x_(draw_resolution_scale_x),
         draw_resolution_scale_y_(draw_resolution_scale_y),
+        draw_resolution_downscale_x_(draw_resolution_downscale_x),
+        draw_resolution_downscale_y_(draw_resolution_downscale_y),
         draw_extent_estimator_(register_file, memory, trace_writer) {
     assert_not_zero(draw_resolution_scale_x);
     assert_not_zero(draw_resolution_scale_y);
+    assert_not_zero(draw_resolution_downscale_x);
+    assert_not_zero(draw_resolution_downscale_y);
   }
 
   const RegisterFile& register_file() const { return register_file_; }
@@ -770,6 +794,9 @@ class RenderTargetCache {
   const RegisterFile& register_file_;
   uint32_t draw_resolution_scale_x_;
   uint32_t draw_resolution_scale_y_;
+  // Stage 1 plumbing, always 1 (native) until Stage 2 - see the accessors above.
+  uint32_t draw_resolution_downscale_x_ = 1;
+  uint32_t draw_resolution_downscale_y_ = 1;
   bool draw_samples_as_pixels_ = false;
   bool draw_samples_as_pixels_keep_vertical_ = false;
   bool draw_pixel_shader_kills_ = false;

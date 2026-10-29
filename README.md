@@ -7,8 +7,6 @@
 
 <p align="center"><strong>Xbox 360 emulation on Android, tuned for Mali.</strong></p>
 
-<p align="center"><b>English</b></p>
-
 ---
 
 **Xendroid-Mali** is an Xbox 360 emulator for Mali GPUs, based on the XenDroid+ project and [Xenia](https://github.com/xenia-project/xenia).
